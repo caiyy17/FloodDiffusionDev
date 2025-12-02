@@ -189,14 +189,19 @@ def main():
 
     logger = None
     if not cfg.debug:
-        os.environ["WANDB_API_KEY"] = cfg.logger.wandb.wandb_key
-        logger = WandbLogger(
-            project=cfg.logger.wandb.project,
-            name=f"{cfg.exp_name}_{run_time}",
-            entity=cfg.logger.wandb.entity,
-            config=OmegaConf.to_container(cfg.config, resolve=True),
-            save_dir=cfg.save_dir,
-        )
+        wandb_key = cfg.logger.wandb.wandb_key
+        if wandb_key and wandb_key.strip():
+            os.environ["WANDB_API_KEY"] = wandb_key
+            logger = WandbLogger(
+                project=cfg.logger.wandb.project,
+                name=f"{cfg.exp_name}_{run_time}",
+                entity=cfg.logger.wandb.entity,
+                config=OmegaConf.to_container(cfg.config, resolve=True),
+                save_dir=cfg.save_dir,
+            )
+            rank_zero_info("WandB logging enabled")
+        else:
+            rank_zero_info("WandB API key not provided, skipping WandB logging")
 
     # dataloader
     collate_fn = (
