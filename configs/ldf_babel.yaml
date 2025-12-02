@@ -1,4 +1,4 @@
-exp_name: ldf # Experiment names
+exp_name: ldf_babel # Experiment names
 seed: 1234 # Seed value
 debug: false
 train: true

@@ -1,4 +1,4 @@
-exp_name: vae_wan # Experiment names
+exp_name: vae_wan_1d # Experiment names
 seed: 1234 # Seed value
 debug: false
 train: true

@@ -1,4 +1,4 @@
-exp_name: ldf # Experiment names
+exp_name: stream # Experiment names
 seed: 1234 # Seed value
 
 test_ckpt: "${dirs.outputs}/20251107_021814_ldf_stream/step_step=240000.ckpt"
