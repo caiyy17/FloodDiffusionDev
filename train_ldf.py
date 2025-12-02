@@ -228,7 +228,7 @@ class CustomLightningModule(BasicLightningModule):
                 )
 
                 # wandb log video
-                if not self.cfg.debug:
+                if not self.cfg.debug and self.logger is not None:
                     video_to_log = []
                     for video_path in sorted(
                         os.listdir(f"{self.cfg.save_dir}/{dataset_id}/composite")
@@ -389,7 +389,7 @@ def main():
             )
             model.cfg.test_setting.render = False  # only render once
 
-    if not cfg.debug:
+    if not cfg.debug and logger is not None:
         wandb.finish()
 
 
