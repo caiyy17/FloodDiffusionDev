@@ -94,14 +94,21 @@ To reproduce our results from scratch, follow the original data preparation pipe
 
 We provide all necessary data (datasets, dependencies, and pretrained models) on Hugging Face: 🤗 **[ShandaAI/FloodDiffusionDownloads](https://huggingface.co/ShandaAI/FloodDiffusionDownloads)**
 
-Simply run:
+**For inference only** (downloads `deps/` and `outputs/`):
 
 ```bash
 pip install huggingface_hub
 python download_assets.py
 ```
 
-This will automatically download and extract everything into the correct directories (`deps/`, `raw_data/`, `outputs/`).
+**For training/evaluation** (also downloads datasets in `raw_data/`):
+
+```bash
+pip install huggingface_hub
+python download_assets.py --with-dataset
+```
+
+This will automatically download and extract files into the correct directories.
 
 ### Directory Structure
 

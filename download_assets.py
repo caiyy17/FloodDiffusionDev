@@ -1,6 +1,7 @@
 from huggingface_hub import hf_hub_download
 import zipfile
 import os
+import argparse
 
 REPO_ID = "ShandaAI/FloodDiffusionDownloads"
 
@@ -11,16 +12,33 @@ def download_extract_zip(filename, target_dir="."):
     with zipfile.ZipFile(path, 'r') as zip_ref:
         zip_ref.extractall(target_dir)
 
-# 1. Download and extract Dependencies (creates ./deps/)
-download_extract_zip("deps.zip", ".")
+if __name__ == "__main__":
+    parser = argparse.ArgumentParser(description="Download FloodDiffusion assets")
+    parser.add_argument(
+        "--with-dataset", 
+        action="store_true",
+        help="Download datasets (HumanML3D and BABEL) for training. By default, only deps and outputs are downloaded for inference."
+    )
+    args = parser.parse_args()
 
-# 2. Download and extract Datasets (creates ./raw_data/HumanML3D and ./raw_data/BABEL_streamed)
-os.makedirs("raw_data", exist_ok=True)
-download_extract_zip("HumanML3D.zip", "raw_data")
-download_extract_zip("BABEL_streamed.zip", "raw_data")
+    # 1. Download and extract Dependencies (creates ./deps/)
+    print("Downloading dependencies...")
+    download_extract_zip("deps.zip", ".")
 
-# 3. Download Models (creates ./outputs/)
-download_extract_zip("outputs.zip", ".")
+    # 2. Download and extract Datasets (optional)
+    if args.with_dataset:
+        print("Downloading datasets...")
+        os.makedirs("raw_data", exist_ok=True)
+        download_extract_zip("HumanML3D.zip", "raw_data")
+        download_extract_zip("BABEL_streamed.zip", "raw_data")
+    else:
+        print("Skipping dataset download (add --with-dataset flag to download datasets for training)")
 
-print("Done! Your project is ready.")
+    # 3. Download Models (creates ./outputs/)
+    print("Downloading model outputs...")
+    download_extract_zip("outputs.zip", ".")
+
+    print("\nDone! Your project is ready.")
+    if not args.with_dataset:
+        print("Note: Datasets were not downloaded. This setup is for inference only.")
 
