@@ -69,7 +69,7 @@ class StreamJointRecovery263:
 
     Key insight: The batch version uses PREVIOUS frame's velocity for the current frame,
     so we need to delay the velocity application by one frame.
-    
+
     Args:
         joints_num: Number of joints in the skeleton
         smoothing_alpha: EMA smoothing factor (0.0 to 1.0)

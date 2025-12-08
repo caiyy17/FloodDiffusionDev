@@ -7,8 +7,8 @@ from torch_ema import ExponentialMovingAverage
 
 from utils.initialize import compare_statedict_and_parameters, instantiate, load_config
 from utils.motion_process import StreamJointRecovery263
+from utils.render_skeleton import get_humanml3d_chains, render_simple_skeleton_video
 from utils.visualize import render_single_video
-from utils.render_skeleton import render_simple_skeleton_video, get_humanml3d_chains
 
 # Set tokenizers parallelism to false to avoid warnings in multiprocessing
 os.environ["TOKENIZERS_PARALLELISM"] = "false"
@@ -181,8 +181,12 @@ if __name__ == "__main__":
 
         # Initialize stream joint recovery for converting motion to joint positions
         # Test both without and with smoothing
-        stream_recovery_no_smooth = StreamJointRecovery263(joints_num=22, smoothing_alpha=1.0)
-        stream_recovery_smooth = StreamJointRecovery263(joints_num=22, smoothing_alpha=0.5)
+        stream_recovery_no_smooth = StreamJointRecovery263(
+            joints_num=22, smoothing_alpha=1.0
+        )
+        stream_recovery_smooth = StreamJointRecovery263(
+            joints_num=22, smoothing_alpha=0.5
+        )
         stream_joints_no_smooth = []
         stream_joints_smooth = []
 
@@ -206,16 +210,24 @@ if __name__ == "__main__":
                 decoded_g_np = decoded_g.cpu().numpy()
                 if decoded_g_np.ndim == 1:
                     # Single frame
-                    frame_joints_no_smooth = stream_recovery_no_smooth.process_frame(decoded_g_np)
-                    frame_joints_smooth = stream_recovery_smooth.process_frame(decoded_g_np)
+                    frame_joints_no_smooth = stream_recovery_no_smooth.process_frame(
+                        decoded_g_np
+                    )
+                    frame_joints_smooth = stream_recovery_smooth.process_frame(
+                        decoded_g_np
+                    )
                     stream_joints_no_smooth.append(frame_joints_no_smooth)
                     stream_joints_smooth.append(frame_joints_smooth)
                 else:
                     # Multiple frames
                     for frame_idx in range(decoded_g_np.shape[0]):
                         frame_data = decoded_g_np[frame_idx]
-                        frame_joints_no_smooth = stream_recovery_no_smooth.process_frame(frame_data)
-                        frame_joints_smooth = stream_recovery_smooth.process_frame(frame_data)
+                        frame_joints_no_smooth = (
+                            stream_recovery_no_smooth.process_frame(frame_data)
+                        )
+                        frame_joints_smooth = stream_recovery_smooth.process_frame(
+                            frame_data
+                        )
                         stream_joints_no_smooth.append(frame_joints_no_smooth)
                         stream_joints_smooth.append(frame_joints_smooth)
 
@@ -232,15 +244,17 @@ if __name__ == "__main__":
 
         stream_joints_no_smooth = np.array(stream_joints_no_smooth)
         stream_joints_smooth = np.array(stream_joints_smooth)
-        print(f"stream_joints shape: {stream_joints_no_smooth.shape}")  # Should be (num_frames, 22, 3)
+        print(
+            f"stream_joints shape: {stream_joints_no_smooth.shape}"
+        )  # Should be (num_frames, 22, 3)
 
         render_single_video(
             motion=stream_decoded_g.cpu().numpy(),
-            save_path=f"tmp/stream_generated_step.mp4",
+            save_path="tmp/stream_generated_step.mp4",
             dim=263,
             render_setting={},
         )
-        
+
         # Render joint positions (no smoothing)
         print("Rendering joints (no smoothing)...")
         chains = get_humanml3d_chains()
@@ -250,7 +264,7 @@ if __name__ == "__main__":
             out_path="tmp/stream_joints_no_smooth.mp4",
             fps=20,
         )
-        
+
         # Render joint positions (with smoothing)
         print("Rendering joints (with smoothing)...")
         render_simple_skeleton_video(
@@ -259,9 +273,9 @@ if __name__ == "__main__":
             out_path="tmp/stream_joints_smooth.mp4",
             fps=20,
         )
-        
+
         print("Streaming generate step done")
-        
+
         # Save smoothed joints for future use
         np.save("tmp/stream_joints_no_smooth.npy", stream_joints_no_smooth)
         np.save("tmp/stream_joints_smooth.npy", stream_joints_smooth)
