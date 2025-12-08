@@ -70,7 +70,7 @@ class ModelManager:
         self.frame_buffer = FrameBuffer(target_buffer_size=4)
         
         # Stream joint recovery with smoothing
-        self.smoothing_alpha = 1.0  # Default: no smoothing
+        self.smoothing_alpha = 0.5  # Default: medium smoothing
         self.stream_recovery = StreamJointRecovery263(joints_num=22, smoothing_alpha=self.smoothing_alpha)
         
         # Generation state
