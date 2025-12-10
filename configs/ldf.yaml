@@ -87,8 +87,9 @@ data:
     train_meta_paths:
         - ${dirs.raw_data}/HumanML3D/train.txt
     val_meta_paths:
+        - ${dirs.raw_data}/HumanML3D/val.txt
         # - ${dirs.raw_data}/HumanML3D/test_min.txt
-        - ${dirs.raw_data}/HumanML3D/test.txt
+        # - ${dirs.raw_data}/HumanML3D/test.txt
     test_meta_paths:
         - ${dirs.raw_data}/HumanML3D/test_min.txt
     feature_path: "new_joint_vecs"
