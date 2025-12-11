@@ -75,20 +75,23 @@ For detailed API documentation, see the [model card](https://huggingface.co/Shan
 To reproduce our results from scratch, follow the original data preparation pipelines:
 
 **HumanML3D**:
-- Follow the instructions in the [HumanML3D repository](https://github.com/EricGuo5513/HumanML3D)
-- Extract 263D motion features using their processing pipeline
-- Place the processed data in `raw_data/HumanML3D/`
+
+-   Follow the instructions in the [HumanML3D repository](https://github.com/EricGuo5513/HumanML3D)
+-   Extract 263D motion features using their processing pipeline
+-   Place the processed data in `raw_data/HumanML3D/`
 
 **BABEL**:
-- Download from the [BABEL website](https://babel.is.tue.mpg.de/)
-- Process the motion sequences to extract 263D features
-- For streaming generation, segment and process according to the frame-level annotations
-- Place the processed data in `raw_data/BABEL_streamed/`
+
+-   Download from the [BABEL website](https://babel.is.tue.mpg.de/)
+-   Process the motion sequences to extract 263D features
+-   For streaming generation, segment and process according to the frame-level annotations
+-   Place the processed data in `raw_data/BABEL_streamed/`
 
 **Dependencies**:
-- Download T5 encoder weights from Hugging Face
-- Download T2M evaluation models from the [text-to-motion repository](https://github.com/EricGuo5513/text-to-motion)
-- Download GloVe embeddings
+
+-   Download T5 encoder weights from Hugging Face
+-   Download T2M evaluation models from the [text-to-motion repository](https://github.com/EricGuo5513/text-to-motion)
+-   Download GloVe embeddings
 
 ### Quick Start: Download Preprocessed Data (Recommended)
 
@@ -159,7 +162,7 @@ raw_data/
 **Pretrained Models Directory**:
 
 ```
-outputs/                     # Pretrained model checkpoints
+outputs/
 ├── vae_1d_z4_step=300000.ckpt          # VAE model (1D, z_dim=4)
 ├── 20251106_063218_ldf/
 │   └── step_step=50000.ckpt            # LDF model checkpoint (HumanML3D)
@@ -263,7 +266,7 @@ For real-time interactive demo with streaming generation, see [`web_demo/README.
 ## Project Structure
 
 ```
-pl_train/
+<project_root>/
 ├── configs/                        # Configuration files
 │   ├── vae_wan_1d.yaml             # VAE training config
 │   ├── ldf.yaml                    # LDF training (HumanML3D)
@@ -302,12 +305,13 @@ pl_train/
 ```
 <project_root>/
 ├── deps/                           # Model dependencies
+├── outputs/                        # Pretrained model checkpoints
 └── raw_data/                       # Motion datasets
 ```
 
 ## Update History
 
-- **2025/12/8**: Added EMA smoothing option for joint positions during rendering
+-   **2025/12/8**: Added EMA smoothing option for joint positions during rendering
 
 ## Citation
 
