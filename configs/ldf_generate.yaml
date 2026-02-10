@@ -92,7 +92,6 @@ model:
     ema_decay: 0.99
     params:
         input_dim: 4
-        noise_steps: 10
         crossmodules:
             - name: T5TextCrossModule
               len: 512

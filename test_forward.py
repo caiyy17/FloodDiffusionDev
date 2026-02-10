@@ -41,6 +41,7 @@ class DummyCrossModule(nn.Module):
 
 
 # Create model with small dims for fast testing
+device = torch.device("cuda:0")
 model = DiffForcingWanModel(
     input_dim=4,
     hidden_dim=128,
@@ -49,13 +50,13 @@ model = DiffForcingWanModel(
     num_heads=4,
     num_layers=2,
     crossmodules=[{"name": "DummyCrossModule", "len": 16, "dim": 64}],
-)
+).to(device)
 
 # Create dummy input
 batch_size = 2
 seq_len = 20
 x = {
-    "feature": torch.randn(batch_size, seq_len, 4),
+    "feature": torch.randn(batch_size, seq_len, 4, device=device),
     "feature_length": torch.tensor([15, 20]),
     "text": ["hello world", "test text"],
 }
@@ -65,6 +66,23 @@ print("Testing forward...")
 try:
     loss_dict = model(x)
     print(f"Forward succeeded! Loss: {loss_dict}")
+    # Test backward
+    loss_dict["total"].backward()
+    grad_norms = {name: p.grad.norm().item() for name, p in model.named_parameters() if p.grad is not None}
+    print(f"Backward succeeded! {len(grad_norms)} params have gradients")
+except Exception as e:
+    import traceback
+    traceback.print_exc()
+
+# Test generate
+print("\nTesting generate...")
+model.zero_grad()
+try:
+    with torch.no_grad():
+        out = model.generate(x)
+    print(f"Generate succeeded! Output keys: {list(out.keys())}")
+    for i, g in enumerate(out["generated"]):
+        print(f"  generated[{i}] shape: {g.shape}")
 except Exception as e:
     import traceback
     traceback.print_exc()
