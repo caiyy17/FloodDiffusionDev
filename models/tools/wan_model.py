@@ -196,7 +196,7 @@ class WanAttentionBlock(nn.Module):
         num_heads,
         window_size=(-1, -1),
         qk_norm=True,
-        cross_attn_norm=False,
+        cross_attn_norm=(False,),
         eps=1e-6,
         causal=False,
     ):
@@ -206,7 +206,8 @@ class WanAttentionBlock(nn.Module):
         self.num_heads = num_heads
         self.window_size = window_size
         self.qk_norm = qk_norm
-        self.cross_attn_norm = cross_attn_norm
+        self.cross_attn_norm = list(cross_attn_norm)
+        self.num_cross = len(cross_attn_norm)
         self.eps = eps
         self.causal = causal
         # layers
@@ -214,13 +215,15 @@ class WanAttentionBlock(nn.Module):
         self.self_attn = WanSelfAttention(
             dim, num_heads, window_size, qk_norm, eps, causal
         )
-        self.norm3 = (
+        self.cross_attn_norms = nn.ModuleList([
             WanLayerNorm(dim, eps, elementwise_affine=True)
-            if cross_attn_norm
-            else nn.Identity()
-        )
-
-        self.cross_attn = WanCrossAttention(dim, num_heads, (-1, -1), qk_norm, eps)
+            if can else nn.Identity()
+            for can in cross_attn_norm
+        ])
+        self.cross_attn = nn.ModuleList([
+            WanCrossAttention(dim, num_heads, (-1, -1), qk_norm, eps)
+            for _ in range(self.num_cross)
+        ])
         self.norm2 = WanLayerNorm(dim, eps)
         self.ffn = nn.Sequential(
             nn.Linear(dim, ffn_dim),
@@ -266,7 +269,8 @@ class WanAttentionBlock(nn.Module):
 
         # cross-attention & ffn function
         def cross_attn_ffn(x, context, context_lens, e):
-            x = x + self.cross_attn(self.norm3(x), context, context_lens)
+            for i in range(self.num_cross):
+                x = x + self.cross_attn[i](self.cross_attn_norms[i](x), context[i], context_lens[i])
             y = self.ffn(
                 self.norm2(x).float() * (1 + e[4].squeeze(2)) + e[3].squeeze(2)
             )
@@ -311,33 +315,24 @@ class WanModel(ModelMixin, ConfigMixin):
     r"""
     Wan diffusion backbone supporting both text-to-video and image-to-video.
     """
-
-    ignore_for_config = [
-        "patch_size",
-        "cross_attn_norm",
-        "qk_norm",
-        "text_dim",
-        "window_size",
-    ]
     _no_split_modules = ["WanAttentionBlock"]
 
     @register_to_config
     def __init__(
         self,
-        model_type="t2v",
         patch_size=(1, 2, 2),
-        text_len=512,
+        cross_len=(512,),
+        cross_dim=(4096,),
+        cross_attn_norm=(True,),
         in_dim=16,
         dim=2048,
         ffn_dim=8192,
         freq_dim=256,
-        text_dim=4096,
         out_dim=16,
         num_heads=16,
         num_layers=32,
         window_size=(-1, -1),
         qk_norm=True,
-        cross_attn_norm=True,
         eps=1e-6,
         causal=False,
     ):
@@ -345,12 +340,14 @@ class WanModel(ModelMixin, ConfigMixin):
         Initialize the diffusion model backbone.
 
         Args:
-            model_type (`str`, *optional*, defaults to 't2v'):
-                Model variant - 't2v' (text-to-video) or 'i2v' (image-to-video)
             patch_size (`tuple`, *optional*, defaults to (1, 2, 2)):
                 3D patch dimensions for video embedding (t_patch, h_patch, w_patch)
-            text_len (`int`, *optional*, defaults to 512):
-                Fixed length for text embeddings
+            cross_len (`tuple[int]`, *optional*, defaults to (512,)):
+                Fixed lengths for each cross-attention source
+            cross_dim (`tuple[int]`, *optional*, defaults to (4096,)):
+                Input dimensions for each cross-attention source
+            cross_attn_norm (`tuple[bool]`, *optional*, defaults to (True,)):
+                Enable cross-attention normalization for each cross-attention source
             in_dim (`int`, *optional*, defaults to 16):
                 Input video channels (C_in)
             dim (`int`, *optional*, defaults to 2048):
@@ -359,8 +356,6 @@ class WanModel(ModelMixin, ConfigMixin):
                 Intermediate dimension in feed-forward network
             freq_dim (`int`, *optional*, defaults to 256):
                 Dimension for sinusoidal time embeddings
-            text_dim (`int`, *optional*, defaults to 4096):
-                Input dimension for text embeddings
             out_dim (`int`, *optional*, defaults to 16):
                 Output video channels (C_out)
             num_heads (`int`, *optional*, defaults to 16):
@@ -371,39 +366,41 @@ class WanModel(ModelMixin, ConfigMixin):
                 Window size for local attention (-1 indicates global attention)
             qk_norm (`bool`, *optional*, defaults to True):
                 Enable query/key normalization
-            cross_attn_norm (`bool`, *optional*, defaults to False):
-                Enable cross-attention normalization
             eps (`float`, *optional*, defaults to 1e-6):
                 Epsilon value for normalization layers
+            causal (`bool`, *optional*, defaults to False):
+                Enable causal attention for self-attention
         """
 
         super().__init__()
 
-        assert model_type in ["t2v", "i2v", "ti2v", "s2v"]
-        self.model_type = model_type
-
         self.patch_size = patch_size
-        self.text_len = text_len
+        self.cross_len = list(cross_len)
+        self.cross_dim = list(cross_dim)
+        self.cross_attn_norm = list(cross_attn_norm)
+        self.num_cross = len(cross_len)
         self.in_dim = in_dim
         self.dim = dim
         self.ffn_dim = ffn_dim
         self.freq_dim = freq_dim
-        self.text_dim = text_dim
         self.out_dim = out_dim
         self.num_heads = num_heads
         self.num_layers = num_layers
         self.window_size = window_size
         self.qk_norm = qk_norm
-        self.cross_attn_norm = cross_attn_norm
         self.eps = eps
         self.causal = causal
+        
         # embeddings
         self.patch_embedding = nn.Conv3d(
             in_dim, dim, kernel_size=patch_size, stride=patch_size
         )
-        self.text_embedding = nn.Sequential(
-            nn.Linear(text_dim, dim), nn.GELU(approximate="tanh"), nn.Linear(dim, dim)
-        )
+        self.cross_embeddings = nn.ModuleList([
+            nn.Sequential(
+                nn.Linear(cd, dim), nn.GELU(approximate="tanh"), nn.Linear(dim, dim)
+            )
+            for cd in self.cross_dim
+        ])
 
         self.time_embedding = nn.Sequential(
             nn.Linear(freq_dim, dim), nn.SiLU(), nn.Linear(dim, dim)
@@ -472,8 +469,6 @@ class WanModel(ModelMixin, ConfigMixin):
             List[Tensor]:
                 List of denoised video tensors with original input shapes [C_out, F, H / 8, W / 8]
         """
-        if self.model_type == "i2v":
-            assert y is not None
         # params
         device = self.patch_embedding.weight.device
         if self.freqs.device != device:
@@ -511,16 +506,23 @@ class WanModel(ModelMixin, ConfigMixin):
             e0 = self.time_projection(e).unflatten(2, (6, self.dim))
             assert e.dtype == torch.float32 and e0.dtype == torch.float32
 
-        # context
-        context_lens = torch.tensor([u.size(0) for u in context], dtype=torch.long)
-        context = self.text_embedding(
-            torch.stack(
-                [
-                    torch.cat([u, u.new_zeros(self.text_len - u.size(0), u.size(1))])
-                    for u in context
-                ]
+        # context - list of cross-attention sources
+        # context[i] is a list of B tensors for the i-th cross source
+        all_contexts = []
+        all_context_lens = []
+        for i in range(self.num_cross):
+            ctx_list = context[i]
+            ctx_lens = torch.tensor([u.size(0) for u in ctx_list], dtype=torch.long)
+            ctx = self.cross_embeddings[i](
+                torch.stack(
+                    [
+                        torch.cat([u, u.new_zeros(self.cross_len[i] - u.size(0), u.size(1))])
+                        for u in ctx_list
+                    ]
+                )
             )
-        )
+            all_contexts.append(ctx)
+            all_context_lens.append(ctx_lens)
 
         # arguments
         kwargs = dict(
@@ -528,8 +530,8 @@ class WanModel(ModelMixin, ConfigMixin):
             seq_lens=seq_lens,
             grid_sizes=grid_sizes,
             freqs=self.freqs,
-            context=context,
-            context_lens=context_lens,
+            context=all_contexts,
+            context_lens=all_context_lens,
         )
 
         for block in self.blocks:
@@ -581,9 +583,10 @@ class WanModel(ModelMixin, ConfigMixin):
 
         # init embeddings
         nn.init.xavier_uniform_(self.patch_embedding.weight.flatten(1))
-        for m in self.text_embedding.modules():
-            if isinstance(m, nn.Linear):
-                nn.init.normal_(m.weight, std=0.02)
+        for emb in self.cross_embeddings:
+            for m in emb.modules():
+                if isinstance(m, nn.Linear):
+                    nn.init.normal_(m.weight, std=0.02)
         for m in self.time_embedding.modules():
             if isinstance(m, nn.Linear):
                 nn.init.normal_(m.weight, std=0.02)
