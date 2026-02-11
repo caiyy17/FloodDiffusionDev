@@ -1,5 +1,5 @@
 exp_name: ldf # Experiment names
-seed: 1234 # Seed value
+seed: 12345 # Seed value
 debug: false
 train: false
 
@@ -22,7 +22,7 @@ test_setting:
             - "${dirs.raw_data}/HumanML3D/animations"
         compare_names:
             - "Ground Truth"
-val_repeat: 1
+val_repeat: 100
 
 logger:
     wandb:

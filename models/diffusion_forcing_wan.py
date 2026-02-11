@@ -1,4 +1,5 @@
 import os
+import math
 
 import numpy as np
 import torch
@@ -11,16 +12,13 @@ from .tools.wan_model import WanModel
 CROSS_MODULE_REGISTRY = {}
 TIME_SCHEDULER_REGISTRY = {}
 
-
 def register_cross_module(cls):
     CROSS_MODULE_REGISTRY[cls.__name__] = cls
     return cls
 
-
 def register_time_scheduler(cls):
     TIME_SCHEDULER_REGISTRY[cls.__name__] = cls
     return cls
-
 
 @register_time_scheduler
 class UniformTimeScheduler:
@@ -28,6 +26,9 @@ class UniformTimeScheduler:
         self.steps = config["steps"]
         self.noise_type = config.get("noise_type", "linear")
         self.exponent = config.get("exponent", 2.0)
+
+    def get_total_steps(self, seq_len):
+        return self.steps
 
     def get_time_steps(self, device, valid_len, current_step=None):
         time_steps = []
@@ -43,9 +44,6 @@ class UniformTimeScheduler:
                 t = current_step[i] * (1 / self.steps)
                 time_steps.append(torch.tensor(t, device=device, dtype=torch.float64))
         return time_steps
-
-    def get_total_steps(self, seq_len):
-        return self.steps
 
     def get_time_schedules(self, device, valid_len, time_steps):
         time_schedules = []
@@ -89,7 +87,6 @@ class UniformTimeScheduler:
             noise_level_derivative.append(nld)
         return noise_level, noise_level_derivative
 
-
 @register_time_scheduler
 class TriangularTimeScheduler:
     def __init__(self, config):
@@ -98,44 +95,54 @@ class TriangularTimeScheduler:
         self.noise_type = config.get("noise_type", "linear")
         self.exponent = config.get("exponent", 2.0)
 
+    def get_total_steps(self, seq_len):
+        return int(self.steps * seq_len / self.chunk_size)
+
     def get_time_steps(self, device, valid_len, current_step=None):
         time_steps = []
         if current_step is None:
             for i in range(len(valid_len)):
                 max_time = valid_len[i] / self.chunk_size
-                time_steps.append(torch.tensor(np.random.uniform(0, max_time), device=device, dtype=torch.float64))
+                time_steps.append(torch.tensor(np.random.uniform(0, max_time), device=device))
         elif isinstance(current_step, int):
             for i in range(len(valid_len)):
                 t = current_step * (1 / self.steps)
-                time_steps.append(torch.tensor(t, device=device, dtype=torch.float64))
+                time_steps.append(torch.tensor(t, device=device))
         elif isinstance(current_step, list):
             for i in range(len(valid_len)):
                 t = current_step[i] * (1 / self.steps)
-                time_steps.append(torch.tensor(t, device=device, dtype=torch.float64))
+                time_steps.append(torch.tensor(t, device=device))
         return time_steps
-
-    def get_total_steps(self, seq_len):
-        return int(self.steps * seq_len / self.chunk_size)
 
     def get_time_schedules(self, device, valid_len, time_steps):
         time_schedules = []
         time_schedules_derivative = []
         for i in range(len(valid_len)):
             t = time_steps[i].item()
-            time_schedules.append(torch.clamp(
+            time_schedules = torch.clamp(
                 -torch.arange(valid_len[i], device=device) / self.chunk_size + t,
                 min=0.0,
                 max=1.0,
-            ))
-            time_schedules_derivative.append(torch.ones(valid_len[i], device=device) / self.steps)
+            )
+            time_schedules_next = torch.clamp(
+                -torch.arange(valid_len[i], device=device) / self.chunk_size + t + (1 / self.steps),
+                min=0.0,
+                max=1.0,
+            )
+            time_schedules_derivative = torch.clamp((time_schedules_next - time_schedules), min=0.0, max=1.0)
+            time_schedules.append(time_schedules)
+            time_schedules_derivative.append(time_schedules_derivative)
         return time_schedules, time_schedules_derivative
 
     def get_windows(self, valid_len, time_steps):
+        # suppose self.steps % self.chunk_size == 0
+        # so the index can be added by a small amount to get the correct window
+        # we choose 0.5 * (1 / self.steps) here
         input_start, input_end, output_start, output_end = [], [], [], []
         for i in range(len(time_steps)):
             t = time_steps[i].item()
-            start_index = max(0, int((t - 1) * self.chunk_size) + 1)
-            end_index = min(valid_len[i], int(t * self.chunk_size) + 1)
+            start_index = max(0, math.floor((t - 1) * self.chunk_size + 0.5 * (1 / self.steps)) + 1)
+            end_index = min(valid_len[i], math.floor(t * self.chunk_size + 0.5 * (1 / self.steps)) + 1)
             input_start.append(0)
             input_end.append(end_index)
             output_start.append(start_index)
@@ -165,9 +172,6 @@ class TriangularTimeScheduler:
             noise_level.append(nl)
             noise_level_derivative.append(nld)
         return noise_level, noise_level_derivative
-
-
-
 
 @register_cross_module
 class T5TextCrossModule(nn.Module):
@@ -346,7 +350,6 @@ class T5TextCrossModule(nn.Module):
                 trim_len:
             ]
 
-
 class DiffForcingWanModel(nn.Module):
     def __init__(
         self,
@@ -357,6 +360,8 @@ class DiffForcingWanModel(nn.Module):
         num_heads=8,
         num_layers=8,
         time_embedding_scale=1.0,
+        causal=False,
+        prediction_type="vel",  # "vel", "x0", "noise"
         crossmodules=[
             {
                 "name": "T5TextCrossModule",
@@ -364,8 +369,6 @@ class DiffForcingWanModel(nn.Module):
                 "dim": 4096,
             }
         ],
-        prediction_type="vel",  # "vel", "x0", "noise"
-        causal=False,
         schedule_config={
             "schedule_name": "TriangularTimeScheduler",
             "noise_type": "linear",
@@ -509,15 +512,15 @@ class DiffForcingWanModel(nn.Module):
         )
 
         # Pad noise_level list into [B, seq_len] tensor for WanModel
-        noise_level_padded = torch.zeros(batch_size, seq_len, device=device)
+        time_schedules_padded = torch.zeros(batch_size, seq_len, device=device)
         for i in range(batch_size):
-            nl = noise_level[i][:input_end_index[i]]
-            noise_level_padded[i, :len(nl)] = nl
+            ts = time_schedules[i][:input_end_index[i]]
+            time_schedules_padded[i, :len(ts)] = ts
 
         # Through WanModel
         predicted_result = self.model(
             noisy_feature_input,
-            noise_level_padded * self.time_embedding_scale,
+            time_schedules_padded * self.time_embedding_scale,
             all_contexts,
             seq_len,
             y=None,
@@ -600,14 +603,14 @@ class DiffForcingWanModel(nn.Module):
                 noisy_input.append(generated[i][:, input_start_index[i]:input_end_index[i], ...])  # (C, T, 1, 1)
 
             # Pad noise_level list into [B, seq_len] tensor for WanModel
-            noise_level_padded = torch.zeros(batch_size, seq_len, device=device)
+            time_schedules_padded = torch.zeros(batch_size, seq_len, device=device)
             for i in range(batch_size):
-                nl = noise_level[i][:input_end_index[i]]
-                noise_level_padded[i, :len(nl)] = nl
+                ts = time_schedules[i][:input_end_index[i]]
+                time_schedules_padded[i, :len(ts)] = ts
 
             predicted_result = self.model(
                 noisy_input,
-                noise_level_padded * self.time_embedding_scale,
+                time_schedules_padded * self.time_embedding_scale,
                 all_contexts,
                 seq_len,
                 y=None,
@@ -617,7 +620,7 @@ class DiffForcingWanModel(nn.Module):
             if self.cfg_scale != 1.0:
                 predicted_result_null = self.model(
                     noisy_input,
-                    noise_level_padded * self.time_embedding_scale,
+                    time_schedules_padded * self.time_embedding_scale,
                     all_null_contexts,
                     seq_len,
                     y=None,
