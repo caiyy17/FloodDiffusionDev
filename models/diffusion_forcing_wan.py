@@ -119,19 +119,19 @@ class TriangularTimeScheduler:
         time_schedules_derivative = []
         for i in range(len(valid_len)):
             t = time_steps[i].item()
-            time_schedules = torch.clamp(
+            current_time_schedules = torch.clamp(
                 -torch.arange(valid_len[i], device=device) / self.chunk_size + t,
                 min=0.0,
                 max=1.0,
             )
-            time_schedules_next = torch.clamp(
+            current_time_schedules_next = torch.clamp(
                 -torch.arange(valid_len[i], device=device) / self.chunk_size + t + (1 / self.steps),
                 min=0.0,
                 max=1.0,
             )
-            time_schedules_derivative = torch.clamp((time_schedules_next - time_schedules), min=0.0, max=1.0)
-            time_schedules.append(time_schedules)
-            time_schedules_derivative.append(time_schedules_derivative)
+            current_time_schedules_derivative = torch.clamp((current_time_schedules_next - current_time_schedules), min=0.0, max=1.0)
+            time_schedules.append(current_time_schedules)
+            time_schedules_derivative.append(current_time_schedules_derivative)
         return time_schedules, time_schedules_derivative
 
     def get_windows(self, valid_len, time_steps):
@@ -387,11 +387,11 @@ class DiffForcingWanModel(nn.Module):
         self.num_heads = num_heads
         self.num_layers = num_layers
         self.time_embedding_scale = time_embedding_scale
+        self.causal = causal
+        self.prediction_type = prediction_type
+        self.cfg_scale = cfg_scale
         self.schedule_config = schedule_config
         self.time_scheduler = TIME_SCHEDULER_REGISTRY[schedule_config["schedule_name"]](schedule_config)
-        self.cfg_scale = cfg_scale
-        self.prediction_type = prediction_type
-        self.causal = causal
         # Cross-attention modules
         self.cross_modules = nn.ModuleList()
         for cm_cfg in crossmodules:

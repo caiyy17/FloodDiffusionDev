@@ -13,22 +13,20 @@ model:
     target: models.diffusion_forcing_wan.DiffForcingWanModel
     ema_decay: 0.99
     params:
-        checkpoint_path: "${dirs.deps}/t5_umt5-base-enc/models_t5_umt5-base-enc.pth"
-        tokenizer_path: "${dirs.deps}/t5_umt5-base-enc/google/umt5-base"
-        t5_size: "base"
-        text_dim: 768
+        crossmodules:
+            - name: T5TextCrossModule
+              len: 256
+              dim: 768
+              t5_size: "base"
+              checkpoint_path: "${dirs.deps}/t5_umt5-base-enc/models_t5_umt5-base-enc.pth"
+              tokenizer_path: "${dirs.deps}/t5_umt5-base-enc/google/umt5-base"
         input_dim: 4
-        noise_steps: 10
         hidden_dim: 256
         ffn_dim: 1024
         freq_dim: 64
         num_heads: 8
         num_layers: 8
         time_embedding_scale: 1.0
-        chunk_size: 5
-        use_text_cond: True
-        text_len: 128
-        drop_out: 0.1
         cfg_scale: 5.0
         prediction_type: "vel"
         causal: False

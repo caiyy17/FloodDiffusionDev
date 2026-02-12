@@ -26,12 +26,12 @@ FEATURE_PATH = [
     "new_joint_vecs",
 ]
 TOKEN_PATH = [
-    "TOKENS_20251030_085836_vae_wan_z4",
-    "TOKENS_20251030_085836_vae_wan_z4",
+    "TOKENS_20260113_233726_vae_wan_z4_2250000",
+    "TOKENS_20260113_233726_vae_wan_z4_2250000",
 ]
 RECOVERED_PATH = [
-    "motions_recovered_20251030_085836_vae_wan_z4",
-    "new_joint_vecs_recovered_TOKENS_20251030_085836_vae_wan_z4",
+    "motions_recovered_TOKENS_20260113_233726_vae_wan_z4_2250000",
+    "new_joint_vecs_recovered_TOKENS_20260113_233726_vae_wan_z4_2250000",
 ]
 
 

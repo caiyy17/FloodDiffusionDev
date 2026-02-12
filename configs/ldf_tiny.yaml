@@ -6,9 +6,9 @@ train: true
 save_dir: ./outputs
 resume_ckpt: null
 test_ckpt: "${dirs.outputs}/20251217_023720_ldf_tiny/step_step=60000.ckpt"
-test_vae_ckpt: "${dirs.outputs}/vae_1d_z4_step=300000.ckpt"
+test_vae_ckpt: "${dirs.outputs}/20260113_233726_vae_wan_z4/step_step=2250000.ckpt"
 test_vae:
-    target: models.vae_wan_1d.VAEWanModel
+    target: models.vae_wan.VAEWanModel
     ema_decay: 0.99
     params:
         input_dim: 263
@@ -93,7 +93,7 @@ data:
     test_meta_paths:
         - ${dirs.raw_data}/HumanML3D/test_min.txt
     feature_path: "new_joint_vecs"
-    token_path: "TOKENS_20251030_085836_vae_wan_z4"
+    token_path: "TOKENS_20260113_233726_vae_wan_z4_2250000"
     text_path: "texts"
     random_length: 0
     min_length: 40
@@ -103,22 +103,26 @@ model:
     target: models.diffusion_forcing_wan.DiffForcingWanModel
     ema_decay: 0.99
     params:
-        checkpoint_path: "${dirs.deps}/t5_umt5-base-enc/models_t5_umt5-base-enc.pth"
-        tokenizer_path: "${dirs.deps}/t5_umt5-base-enc/google/umt5-base"
-        t5_size: "base"
-        text_dim: 768
+        # crossmodules:
+        #     - name: T5TextCrossModule
+        #       len: 512
+        #       dim: 4096
+        #       checkpoint_path: "${dirs.deps}/t5_umt5-xxl-enc-bf16/models_t5_umt5-xxl-enc-bf16.pth"
+        #       tokenizer_path: "${dirs.deps}/t5_umt5-xxl-enc-bf16/google/umt5-xxl"
+        crossmodules:
+            - name: T5TextCrossModule
+              len: 256
+              dim: 768
+              t5_size: "base"
+              checkpoint_path: "${dirs.deps}/t5_umt5-base-enc/models_t5_umt5-base-enc.pth"
+              tokenizer_path: "${dirs.deps}/t5_umt5-base-enc/google/umt5-base"
         input_dim: 4
-        noise_steps: 10
         hidden_dim: 256
         ffn_dim: 1024
         freq_dim: 64
         num_heads: 8
         num_layers: 8
         time_embedding_scale: 1.0
-        chunk_size: 5
-        use_text_cond: True
-        text_len: 512
-        drop_out: 0.1
         cfg_scale: 5.0
         prediction_type: "vel"
         causal: False

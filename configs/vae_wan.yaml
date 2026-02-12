@@ -5,7 +5,7 @@ train: true
 
 save_dir: ./outputs
 resume_ckpt: null
-test_ckpt: "${dirs.outputs}/vae_z4_step=300000.ckpt"
+test_ckpt: "${dirs.outputs}/20260113_233726_vae_wan_z4/step_step=2250000.ckpt"
 test_setting:
     render: true
     simple: true
