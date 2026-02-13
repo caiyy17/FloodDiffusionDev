@@ -33,13 +33,13 @@ logger:
 trainer: # lightning trainer
     max_steps: 100000
     accelerator: gpu
-    devices: [0]
+    devices: [0,1,2,3]
     log_every_n_steps: 100
     precision: bf16-mixed
 validation:
-    validation_steps: 1000
-    test_steps: 1000
-    save_every_n_steps: 1000
+    validation_steps: 5000
+    test_steps: 5000
+    save_every_n_steps: 5000
     save_top_k: 100
 metrics:
     dim: 263

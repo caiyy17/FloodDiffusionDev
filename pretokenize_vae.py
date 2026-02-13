@@ -116,10 +116,17 @@ def tokenize_motion(
     data_path = os.path.dirname(path_files[0])
     cur_token_path = os.path.join(data_path, token_path)
     all_tokens = []
+    skipped = 0
     for f in tqdm(os.listdir(cur_token_path), desc="Loading tokens for mean/std"):
         if f.endswith(".npy"):
             token = np.load(os.path.join(cur_token_path, f))
+            if np.any(np.isnan(token)) or np.any(np.isinf(token)):
+                skipped += 1
+                rank_zero_info(f"Skipping {f} due to NaN/Inf")
+                continue
             all_tokens.append(token)
+    if skipped > 0:
+        rank_zero_info(f"Skipped {skipped} files with NaN/Inf")
 
     if all_tokens:
         all_tokens = np.concatenate(all_tokens, axis=0)

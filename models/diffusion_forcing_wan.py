@@ -9,6 +9,7 @@ import torch.nn.functional as F
 from .tools.t5 import T5EncoderModel
 from .tools.wan_model import WanModel
 
+EPSILON = 1e-5
 CROSS_MODULE_REGISTRY = {}
 TIME_SCHEDULER_REGISTRY = {}
 
@@ -450,6 +451,7 @@ class DiffForcingWanModel(nn.Module):
             "chunk_size": 5,
             "steps": 10,
             "extra_len": 4,
+            "random_epsilon": 0.00,
         },
         cfg_config=[
             {
@@ -750,7 +752,7 @@ class DiffForcingWanModel(nn.Module):
                     predicted_vel = (
                         predicted_result_i[:, os:oe, ...]
                         - generated[i][:, os:oe, ...]
-                    ) / (1 + dt - nl) * nld
+                    ) / (1 - nl + EPSILON) * nld
                 generated[i][:, os:oe, ...] += predicted_vel * dt
                 
         generated = self.postprocess(generated)  # list of (T, C)
@@ -897,7 +899,7 @@ class DiffForcingWanModel(nn.Module):
                     predicted_vel = (
                         predicted_result_i[:, pred_os_idx:pred_oe_idx, ...]
                         - self.generated[i][:, os_idx:oe_idx, ...]
-                    ) / (1 + dt - nl) * nld
+                    ) / (1 - nl + EPSILON) * nld
                 self.generated[i][:, os_idx:oe_idx, ...] += predicted_vel * dt
             self.current_step += 1
 

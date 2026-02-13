@@ -37,9 +37,9 @@ trainer: # lightning trainer
     log_every_n_steps: 100
     precision: bf16-mixed
 validation:
-    validation_steps: 1000
-    test_steps: 1000
-    save_every_n_steps: 1000
+    validation_steps: 5000
+    test_steps: 5000
+    save_every_n_steps: 5000
     save_top_k: 100
 metrics:
     dim: 263
@@ -88,8 +88,8 @@ data:
         - ${dirs.raw_data}/HumanML3D/train.txt
     val_meta_paths:
         # - ${dirs.raw_data}/HumanML3D/val.txt
-        - ${dirs.raw_data}/HumanML3D/test_min.txt
-        # - ${dirs.raw_data}/HumanML3D/test.txt
+        # - ${dirs.raw_data}/HumanML3D/test_min.txt
+        - ${dirs.raw_data}/HumanML3D/test.txt
     test_meta_paths:
         - ${dirs.raw_data}/HumanML3D/test_min.txt
     feature_path: "new_joint_vecs"
@@ -103,12 +103,13 @@ model:
     target: models.diffusion_forcing_wan.DiffForcingWanModel
     ema_decay: 0.99
     params:
-        # crossmodules:
-        #     - name: T5TextCrossModule
-        #       len: 512
-        #       dim: 4096
-        #       checkpoint_path: "${dirs.deps}/t5_umt5-xxl-enc-bf16/models_t5_umt5-xxl-enc-bf16.pth"
-        #       tokenizer_path: "${dirs.deps}/t5_umt5-xxl-enc-bf16/google/umt5-xxl"
+        schedule_config:
+            schedule_name: "TriangularTimeScheduler"
+            noise_type: "linear"
+            chunk_size: 5
+            steps: 10
+            extra_len: 4
+            random_epsilon: 0.00
         crossmodules:
             - name: T5TextCrossModule
               len: 256
@@ -126,9 +127,9 @@ model:
         num_layers: 8
         time_embedding_scale: 1.0
         cfg_config:
-            - scale: 5.0
+            - scale: 4.0
               crossmodule: [true]
-            - scale: -4.0
+            - scale: -3.0
               crossmodule: [false]
         prediction_type: "vel"
         causal: False
