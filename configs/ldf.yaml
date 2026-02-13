@@ -112,7 +112,11 @@ model:
         input_dim: 4
         mean_path: "${dirs.raw_data}/HumanML3D/Mean_TOKENS_20260113_233726_vae_wan_z4_2250000.npy"
         std_path: "${dirs.raw_data}/HumanML3D/Std_TOKENS_20260113_233726_vae_wan_z4_2250000.npy"
-        cfg_scale: 5.0
+        cfg_config:
+            - scale: 5.0
+              crossmodule: [true]
+            - scale: -4.0
+              crossmodule: [false]
         prediction_type: "vel"
         causal: False
 

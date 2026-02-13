@@ -125,7 +125,11 @@ model:
         num_heads: 8
         num_layers: 8
         time_embedding_scale: 1.0
-        cfg_scale: 5.0
+        cfg_config:
+            - scale: 5.0
+              crossmodule: [true]
+            - scale: -4.0
+              crossmodule: [false]
         prediction_type: "vel"
         causal: False
 

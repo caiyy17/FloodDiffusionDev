@@ -477,7 +477,7 @@ class DiffForcingWanModel(nn.Module):
         self.causal = causal
         self.rope_channel_split = rope_channel_split
         self.prediction_type = prediction_type
-        self.cfg_scale = cfg_scale
+        self.cfg_config = cfg_config
         self.schedule_config = schedule_config
         self.time_scheduler = TIME_SCHEDULER_REGISTRY[schedule_config["schedule_name"]](schedule_config)
         # Cross-attention modules
@@ -556,29 +556,31 @@ class DiffForcingWanModel(nn.Module):
                 x[i] = x[i].permute(1, 2, 3, 0)
         return x
 
-    def _get_all_contexts(self, x, valid_len, seq_len, device, training=False):
+    def _get_all_contexts(self, x, valid_len, seq_len, device, training=False, crossmodule_switch=None):
         """Get contexts from all cross modules.
+        Args:
+            crossmodule_switch: Optional list of bools, one per cross module.
+                True = use real context, False = use null context.
+                None = use real context for all.
         Returns:
             all_contexts: List[List[Tensor]], one per cross module
             metadata: dict, merged from all cross modules
         """
         all_contexts = []
         metadata = {}
-        for cm in self.cross_modules:
-            ctx, meta = cm.get_context(
-                x, valid_len, seq_len, device, self.param_dtype,
-                training=training,
-            )
-            all_contexts.append(ctx)
-            metadata.update(meta)
+        batch_size = len(valid_len)
+        for idx, cm in enumerate(self.cross_modules):
+            if crossmodule_switch is not None and not crossmodule_switch[idx]:
+                ctx = cm.get_null_context(batch_size, device, self.param_dtype)
+                all_contexts.append(ctx)
+            else:
+                ctx, meta = cm.get_context(
+                    x, valid_len, seq_len, device, self.param_dtype,
+                    training=training,
+                )
+                all_contexts.append(ctx)
+                metadata.update(meta)
         return all_contexts, metadata
-
-    def _get_all_null_contexts(self, batch_size, device):
-        """Get null contexts from all cross modules for CFG."""
-        return [
-            cm.get_null_context(batch_size, device, self.param_dtype)
-            for cm in self.cross_modules
-        ]
 
     def forward(self, x):
         feature_original = x["feature"]  # (B, T, C)
@@ -685,14 +687,17 @@ class DiffForcingWanModel(nn.Module):
         generated = [generated[i] for i in range(batch_size)]
         generated = self.preprocess(generated)
 
-        # Get contexts from cross modules
-        all_contexts, metadata = self._get_all_contexts(
-            x, generated_len, seq_len, device, training=False,
-        )
+        # Precompute contexts for each cfg entry
+        cfg_contexts_list = []
+        metadata = {}
+        for cfg_entry in self.cfg_config:
+            ctx, meta = self._get_all_contexts(
+                x, generated_len, seq_len, device, training=False,
+                crossmodule_switch=cfg_entry["crossmodule"],
+            )
+            cfg_contexts_list.append(ctx)
+            metadata.update(meta)
         full_text = metadata.get("full_text", x.get("text", [""] * batch_size))
-
-        # Get null contexts for CFG
-        all_null_contexts = self._get_all_null_contexts(batch_size, device)
 
         total_steps = self.time_scheduler.get_total_steps(seq_len)
         # Progressively advance from t=0 to t=max_t
@@ -714,27 +719,21 @@ class DiffForcingWanModel(nn.Module):
                 ts = time_schedules[i][:input_end_index[i]]
                 time_schedules_padded[i, :len(ts)] = ts
 
-            predicted_result = self.model(
-                noisy_input,
-                time_schedules_padded * self.time_embedding_scale,
-                all_contexts,
-                seq_len,
-                y=None,
-            )  # list of (C, T, 1, 1)
-
-            # Adjust using CFG
-            if self.cfg_scale != 1.0:
-                predicted_result_null = self.model(
+            # Run model for each cfg entry and accumulate
+            predicted_result = None
+            for cfg_idx, cfg_entry in enumerate(self.cfg_config):
+                scale = cfg_entry["scale"]
+                pred = self.model(
                     noisy_input,
                     time_schedules_padded * self.time_embedding_scale,
-                    all_null_contexts,
+                    cfg_contexts_list[cfg_idx],
                     seq_len,
                     y=None,
                 )
-                predicted_result = [
-                    self.cfg_scale * pv - (self.cfg_scale - 1) * pvn
-                    for pv, pvn in zip(predicted_result, predicted_result_null)
-                ]
+                if predicted_result is None:
+                    predicted_result = [scale * p for p in pred]
+                else:
+                    predicted_result = [a + scale * p for a, p in zip(predicted_result, pred)]
 
             for i in range(batch_size):
                 predicted_result_i = predicted_result[i]  # (C, seq_len, 1, 1)
@@ -797,8 +796,6 @@ class DiffForcingWanModel(nn.Module):
         for cm in self.cross_modules:
             cm.init_stream(self.batch_size)
 
-        # Pre-compute null contexts for CFG
-        self.stream_null_contexts = self._get_all_null_contexts(self.batch_size, device)
 
     def _rollback(self):
         """Shift buffer by seq_len when conditions overflow the window."""
@@ -851,35 +848,36 @@ class DiffForcingWanModel(nn.Module):
             ts = time_schedules[0][is_[0]:ie_[0]][-self.seq_len:]
             cut_length = max(0, (ie_[0] - is_[0]) - self.seq_len)
 
-            all_contexts = [
-                cm.get_stream_context(is_[0], ie_[0], self.seq_len)
-                for cm in self.cross_modules
-            ]
-
             time_schedules_padded = torch.zeros(self.batch_size, self.seq_len, device=device)
             for i in range(self.batch_size):
                 time_schedules_padded[i, :len(ts)] = ts
 
-            predicted_result = self.model(
-                noisy_input,
-                time_schedules_padded * self.time_embedding_scale,
-                all_contexts,
-                self.seq_len,
-                y=None,
-            )
-
-            if self.cfg_scale != 1.0:
-                predicted_result_null = self.model(
+            # Run model for each cfg entry and accumulate
+            predicted_result = None
+            for cfg_entry in self.cfg_config:
+                scale = cfg_entry["scale"]
+                switches = cfg_entry["crossmodule"]
+                entry_contexts = []
+                for j, cm in enumerate(self.cross_modules):
+                    if switches[j]:
+                        entry_contexts.append(
+                            cm.get_stream_context(is_[0], ie_[0], self.seq_len)
+                        )
+                    else:
+                        entry_contexts.append(
+                            cm.get_null_context(self.batch_size, device, self.param_dtype)
+                        )
+                pred = self.model(
                     noisy_input,
                     time_schedules_padded * self.time_embedding_scale,
-                    self.stream_null_contexts,
+                    entry_contexts,
                     self.seq_len,
                     y=None,
                 )
-                predicted_result = [
-                    self.cfg_scale * pv - (self.cfg_scale - 1) * pvn
-                    for pv, pvn in zip(predicted_result, predicted_result_null)
-                ]
+                if predicted_result is None:
+                    predicted_result = [scale * p for p in pred]
+                else:
+                    predicted_result = [a + scale * p for a, p in zip(predicted_result, pred)]
 
             os_idx, oe_idx = os_[0], oe_[0]
             dt = time_schedules_derivative[0][os_idx:oe_idx][None, :, None, None]
