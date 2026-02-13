@@ -95,7 +95,7 @@ class UniformTimeScheduler:
             noise_level: list of (T,)
         """
         noisy_x = []
-        noise = []
+        noise_output = []
         for i in range(len(x)):
             if noise is not None:
                 noise_i = noise[i]
@@ -104,8 +104,8 @@ class UniformTimeScheduler:
             noise_level_i = noise_level[i][None, :, None, None]  # (1, T, 1, 1)
             noisy_x_i = x[i] * (1 - noise_level_i) + noise_level_i * noise_i
             noisy_x.append(noisy_x_i)
-            noise.append(noise_i)
-        return noisy_x, noise
+            noise_output.append(noise_i)
+        return noisy_x, noise_output
 
     # --- Streaming support ---
 
@@ -214,21 +214,24 @@ class TriangularTimeScheduler:
             noise_level_derivative.append(nld)
         return noise_level, noise_level_derivative
     
-    def add_noise(self, x, noise_level, training=False):
+    def add_noise(self, x, noise_level, training=False, noise=None):
         """Add noise
         Args:
             x: list of (C, T, H, W)
             noise_level: list of (T,)
         """
         noisy_x = []
-        noise = []
+        noise_output = []
         for i in range(len(x)):
-            noise_i = torch.randn_like(x[i])
+            if noise is not None:
+                noise_i = noise[i]
+            else:
+                noise_i = torch.randn_like(x[i])
             noise_level_i = noise_level[i][None, :, None, None]  # (1, T, 1, 1)
             noisy_x_i = x[i] * (1 - noise_level_i) + noise_level_i * noise_i
             noisy_x.append(noisy_x_i)
-            noise.append(noise_i)
-        return noisy_x, noise
+            noise_output.append(noise_i)
+        return noisy_x, noise_output
 
     # --- Streaming support ---
 
@@ -448,7 +451,16 @@ class DiffForcingWanModel(nn.Module):
             "steps": 10,
             "extra_len": 4,
         },
-        cfg_scale=5.0,
+        cfg_config=[
+            {
+                "scale": 5.0,
+                "crossmodule": [True],
+            },
+            {
+                "scale": -4.0,
+                "crossmodule": [False],
+            }
+        ]
     ):
         super().__init__()
 
