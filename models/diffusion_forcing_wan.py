@@ -46,7 +46,7 @@ class UniformTimeScheduler:
                 time_steps.append(torch.tensor(t, device=device))
         return time_steps
 
-    def get_time_schedules(self, device, valid_len, time_steps):
+    def get_time_schedules(self, device, valid_len, time_steps, training=False):
         time_schedules = []
         time_schedules_derivative = []
         for i in range(len(valid_len)):
@@ -658,7 +658,7 @@ class DiffForcingWanModel(nn.Module):
         loss_dict = {"total": loss, "mse": loss}
         return loss_dict
 
-    def generate(self, x, schedule_config={}):
+    def generate(self, x):
         """
         Generation - Diffusion Forcing inference
         Uses triangular noise schedule, progressively generating from left to right
@@ -668,8 +668,6 @@ class DiffForcingWanModel(nn.Module):
         2. Each t corresponds to a noise schedule: clean on left, noisy on right, gradient in middle
         3. After each denoising step, t increases slightly and continues
         """
-        self.schedule_config.update(schedule_config)
-        self.time_scheduler = TIME_SCHEDULER_REGISTRY[self.schedule_config["schedule_name"]](self.schedule_config)
         extra_len = self.schedule_config.get("extra_len", 0)
         feature_length = x["feature_length"]  # (B,)
         batch_size = len(feature_length)
