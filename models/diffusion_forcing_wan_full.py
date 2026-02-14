@@ -9,6 +9,7 @@ import torch.nn.functional as F
 from .tools.t5 import T5EncoderModel
 from .tools.wan_model import WanModel
 
+EPSILON = 1e-5
 CROSS_MODULE_REGISTRY = {}
 TIME_SCHEDULER_REGISTRY = {}
 
@@ -24,7 +25,7 @@ def register_time_scheduler(cls):
 class UniformTimeScheduler:
     def __init__(self, config):
         self.steps = config["steps"]
-        self.generate_length = config["generate_length"]
+        self.chunk_size = config["chunk_size"]
         self.noise_type = config.get("noise_type", "linear")
         self.exponent = config.get("exponent", 2.0)
 
@@ -35,18 +36,18 @@ class UniformTimeScheduler:
         time_steps = []
         if current_step is None:
             for i in range(len(valid_len)):
-                time_steps.append(torch.tensor(np.random.uniform(0, 1), device=device, dtype=torch.float64))
+                time_steps.append(torch.tensor(np.random.uniform(0, 1), device=device))
         elif isinstance(current_step, int):
             for i in range(len(valid_len)):
                 t = current_step * (1 / self.steps)
-                time_steps.append(torch.tensor(t, device=device, dtype=torch.float64))
+                time_steps.append(torch.tensor(t, device=device))
         elif isinstance(current_step, list):
             for i in range(len(valid_len)):
                 t = current_step[i] * (1 / self.steps)
-                time_steps.append(torch.tensor(t, device=device, dtype=torch.float64))
+                time_steps.append(torch.tensor(t, device=device))
         return time_steps
 
-    def get_time_schedules(self, device, valid_len, time_steps):
+    def get_time_schedules(self, device, valid_len, time_steps, training=False):
         time_schedules = []
         time_schedules_derivative = []
         for i in range(len(valid_len)):
@@ -87,20 +88,39 @@ class UniformTimeScheduler:
             noise_level.append(nl)
             noise_level_derivative.append(nld)
         return noise_level, noise_level_derivative
+    
+    def add_noise(self, x, noise_level, training=False, noise=None):
+        """Add noise
+        Args:
+            x: list of (C, T, H, W)
+            noise_level: list of (T,)
+        """
+        noisy_x = []
+        noise_output = []
+        for i in range(len(x)):
+            if noise is not None:
+                noise_i = noise[i]
+            else:
+                noise_i = torch.randn_like(x[i])
+            noise_level_i = noise_level[i][None, :, None, None]  # (1, T, 1, 1)
+            noisy_x_i = x[i] * (1 - noise_level_i) + noise_level_i * noise_i
+            noisy_x.append(noisy_x_i)
+            noise_output.append(noise_i)
+        return noisy_x, noise_output
 
     # --- Streaming support ---
 
-    # We assume seq_len is multiple of generate_length for simplicity
+    # We assume seq_len is multiple of chunk_size for simplicity
     def get_committable(self, condition_frames):
         """Given total accumulated conditions, return how many frames can be committed and the corresponding step count."""
-        wave_index = condition_frames // self.generate_length
-        committable_length = wave_index * self.generate_length
+        wave_index = condition_frames // self.chunk_size
+        committable_length = wave_index * self.chunk_size
         committable_steps = wave_index * self.steps
         return committable_length, committable_steps
 
     def get_step_rollback(self, seq_len):
         """Get the step count to subtract when wrapping the buffer by seq_len."""
-        steps = seq_len // self.generate_length * self.steps
+        steps = seq_len // self.chunk_size * self.steps
         return steps
 
 @register_time_scheduler
@@ -110,6 +130,7 @@ class TriangularTimeScheduler:
         self.chunk_size = config["chunk_size"]
         self.noise_type = config.get("noise_type", "linear")
         self.exponent = config.get("exponent", 2.0)
+        self.random_epsilon = config.get("random_epsilon", 0.01) # schedule jittering
 
     def get_total_steps(self, seq_len):
         return int(self.steps * seq_len / self.chunk_size)
@@ -130,7 +151,7 @@ class TriangularTimeScheduler:
                 time_steps.append(torch.tensor(t, device=device))
         return time_steps
 
-    def get_time_schedules(self, device, valid_len, time_steps):
+    def get_time_schedules(self, device, valid_len, time_steps, training=False):
         time_schedules = []
         time_schedules_derivative = []
         for i in range(len(valid_len)):
@@ -146,6 +167,12 @@ class TriangularTimeScheduler:
                 max=1.0,
             )
             current_time_schedules_derivative = torch.clamp((current_time_schedules_next - current_time_schedules), min=0.0, max=1.0)
+            if training:
+                current_time_schedules = torch.clamp(
+                    current_time_schedules + torch.randn_like(current_time_schedules) * self.random_epsilon,
+                    min=0.0,
+                    max=1.0,
+                )
             time_schedules.append(current_time_schedules)
             time_schedules_derivative.append(current_time_schedules_derivative)
         return time_schedules, time_schedules_derivative
@@ -187,6 +214,25 @@ class TriangularTimeScheduler:
             noise_level.append(nl)
             noise_level_derivative.append(nld)
         return noise_level, noise_level_derivative
+    
+    def add_noise(self, x, noise_level, training=False, noise=None):
+        """Add noise
+        Args:
+            x: list of (C, T, H, W)
+            noise_level: list of (T,)
+        """
+        noisy_x = []
+        noise_output = []
+        for i in range(len(x)):
+            if noise is not None:
+                noise_i = noise[i]
+            else:
+                noise_i = torch.randn_like(x[i])
+            noise_level_i = noise_level[i][None, :, None, None]  # (1, T, 1, 1)
+            noisy_x_i = x[i] * (1 - noise_level_i) + noise_level_i * noise_i
+            noisy_x.append(noisy_x_i)
+            noise_output.append(noise_i)
+        return noisy_x, noise_output
 
     # --- Streaming support ---
 
@@ -389,9 +435,9 @@ class DiffForcingWanModel(nn.Module):
         num_layers=8,
         time_embedding_scale=1.0,
         causal=False,
-        rope_channel_split=None,
+        rope_channel_split=[1, 0, 0],
+        spatial_shape=(1, 1),
         prediction_type="vel",  # "vel", "x0", "noise"
-        concat_dim=0,
         crossmodules=[
             {
                 "name": "T5TextCrossModule",
@@ -405,14 +451,25 @@ class DiffForcingWanModel(nn.Module):
             "chunk_size": 5,
             "steps": 10,
             "extra_len": 4,
+            "random_epsilon": 0.00,
         },
-        cfg_scale=5.0,
+        cfg_config=[
+            {
+                "scale": 5.0,
+                "crossmodule": [True],
+            },
+            {
+                "scale": -4.0,
+                "crossmodule": [False],
+            }
+        ]
     ):
         super().__init__()
 
         self.mean_path = mean_path
         self.std_path = std_path
         self.input_dim = input_dim
+        self.spatial_shape = tuple(spatial_shape)
         self.hidden_dim = hidden_dim
         self.ffn_dim = ffn_dim
         self.freq_dim = freq_dim
@@ -422,8 +479,7 @@ class DiffForcingWanModel(nn.Module):
         self.causal = causal
         self.rope_channel_split = rope_channel_split
         self.prediction_type = prediction_type
-        self.concat_dim = concat_dim
-        self.cfg_scale = cfg_scale
+        self.cfg_config = cfg_config
         self.schedule_config = schedule_config
         self.time_scheduler = TIME_SCHEDULER_REGISTRY[schedule_config["schedule_name"]](schedule_config)
         # Cross-attention modules
@@ -455,7 +511,7 @@ class DiffForcingWanModel(nn.Module):
             cross_attn_norm=tuple(
                 cm.cross_attn_norm for cm in self.cross_modules
             ),
-            in_dim=self.input_dim + self.concat_dim,
+            in_dim=self.input_dim,
             dim=self.hidden_dim,
             ffn_dim=self.ffn_dim,
             freq_dim=self.freq_dim,
@@ -471,82 +527,86 @@ class DiffForcingWanModel(nn.Module):
         self.param_dtype = torch.float32
 
     def preprocess(self, x):
-        # (bs, T, C) -> (bs, C, T, 1, 1)
+        """Convert last-channel format to channel-first, padding to 4D (C, T, H, W).
+        (T, C) -> (C, T, 1, 1)
+        (T, H, C) -> (C, T, H, 1)
+        (T, H, W, C) -> (C, T, H, W)
+        """
         for i in range(len(x)):
-            x[i] = x[i].permute(1, 0)[:, :, None, None]
+            ndim = x[i].ndim
+            if ndim == 2:      # (T, C)
+                x[i] = x[i].permute(1, 0)[:, :, None, None]
+            elif ndim == 3:    # (T, H, C)
+                x[i] = x[i].permute(2, 0, 1)[:, :, :, None]
+            elif ndim == 4:    # (T, H, W, C)
+                x[i] = x[i].permute(3, 0, 1, 2)
         return x
 
     def postprocess(self, x):
-        # (bs, C, T, 1, 1) ->  (bs, T, C)
+        """Reverse of preprocess: channel-first 4D back to last-channel, stripping padding dims.
+        (C, T, 1, 1) -> (T, C)
+        (C, T, H, 1) -> (T, H, C)
+        (C, T, H, W) -> (T, H, W, C)
+        """
         for i in range(len(x)):
-            x[i] = x[i].permute(1, 0, 2, 3).contiguous().view(x[i].size(1), -1)
+            shape = x[i].shape  # (C, T, H, W)
+            if shape[2] == 1 and shape[3] == 1:      # (C, T, 1, 1) -> (T, C)
+                x[i] = x[i][:, :, 0, 0].permute(1, 0)
+            elif shape[3] == 1:                        # (C, T, H, 1) -> (T, H, C)
+                x[i] = x[i][:, :, :, 0].permute(1, 2, 0)
+            else:                                      # (C, T, H, W) -> (T, H, W, C)
+                x[i] = x[i].permute(1, 2, 3, 0)
         return x
 
-    def add_noise(self, x, noise_level):
-        """Add noise
-        Args:
-            x: (B, T, D)
-            noise_level: (B, T)
-        """
-        noisy_x = [] # (B, T, D)
-        noise = [] # (B, T, D)
-        for i in range(len(x)):
-            noise_i = torch.randn_like(x[i])
-            # noise_level: (B, T) -> (B, T, 1)
-            noise_level_i = noise_level[i].unsqueeze(-1)
-            noisey_x_i = x[i] * (1 - noise_level_i) + noise_level_i * noise_i
-            noisy_x.append(noisey_x_i)
-            noise.append(noise_i)
-        return noisy_x, noise
-
-    def _get_all_contexts(self, x, valid_len, seq_len, device, training=False):
+    def _get_all_contexts(self, x, valid_len, seq_len, device, training=False, crossmodule_switch=None):
         """Get contexts from all cross modules.
+        Args:
+            crossmodule_switch: Optional list of bools, one per cross module.
+                True = use real context, False = use null context.
+                None = use real context for all.
         Returns:
             all_contexts: List[List[Tensor]], one per cross module
             metadata: dict, merged from all cross modules
         """
         all_contexts = []
         metadata = {}
-        for cm in self.cross_modules:
-            ctx, meta = cm.get_context(
-                x, valid_len, seq_len, device, self.param_dtype,
-                training=training,
-            )
-            all_contexts.append(ctx)
-            metadata.update(meta)
+        batch_size = len(valid_len)
+        for idx, cm in enumerate(self.cross_modules):
+            if crossmodule_switch is not None and not crossmodule_switch[idx]:
+                ctx = cm.get_null_context(batch_size, device, self.param_dtype)
+                all_contexts.append(ctx)
+            else:
+                ctx, meta = cm.get_context(
+                    x, valid_len, seq_len, device, self.param_dtype,
+                    training=training,
+                )
+                all_contexts.append(ctx)
+                metadata.update(meta)
         return all_contexts, metadata
-
-    def _get_all_null_contexts(self, batch_size, device):
-        """Get null contexts from all cross modules for CFG."""
-        return [
-            cm.get_null_context(batch_size, device, self.param_dtype)
-            for cm in self.cross_modules
-        ]
 
     def forward(self, x):
         feature_original = x["feature"]  # (B, T, C)
         feature_length = x["feature_length"]  # (B,)
         feature_original = (feature_original - self.mean) / self.std
-        batch_size, seq_len, _ = feature_original.shape
+        batch_size = feature_original.shape[0]
+        seq_len = feature_original.shape[1]
         device = feature_original.device
         feature = []
-        concat_feature = []
         valid_len = []
         for i in range(batch_size):
             length = min(feature_length[i].item(), seq_len)
             valid_len.append(length)
-            feature.append(feature_original[i, :length, :])
+            feature.append(feature_original[i, :length, ...])
+
+        # Preprocess to (C, T, 1, 1) per sample
+        feature = self.preprocess(feature)
+
         # get time steps and noise levels
         time_steps = self.time_scheduler.get_time_steps(device, valid_len)  # (B,)
-        time_schedules, _ = self.time_scheduler.get_time_schedules(device, valid_len, time_steps)  # (B, T)
+        time_schedules, _ = self.time_scheduler.get_time_schedules(device, valid_len, time_steps, training=True)  # (B, T)
         noise_level, noise_level_derivative = self.time_scheduler.get_noise_levels(device, valid_len, time_schedules)  # (B, T)
         input_start_index, input_end_index, output_start_index, output_end_index = self.time_scheduler.get_windows(valid_len, time_steps)
-
-        # Add noise to entire sequence
-        noisy_feature, noise = self.add_noise(feature, noise_level)  # (B, T, D)
-        feature = self.preprocess(feature)  # (B, C, T, 1, 1)
-        noisy_feature = self.preprocess(noisy_feature)  # (B, C, T, 1, 1)
-        noise = self.preprocess(noise)  # (B, C, T, 1, 1)
+        noisy_feature, noise = self.time_scheduler.add_noise(feature, noise_level, training=True)
 
         feature_ref = []
         noise_ref = []
@@ -555,21 +615,6 @@ class DiffForcingWanModel(nn.Module):
             feature_ref.append(feature[i][:, output_start_index[i]:output_end_index[i], ...])
             noise_ref.append(noise[i][:, output_start_index[i]:output_end_index[i], ...])
             noisy_feature_input.append(noisy_feature[i][:, input_start_index[i]:input_end_index[i], ...])
-
-        # Append concat features if any
-        if self.concat_dim > 0:
-            concat_feature_ = x["concat_feature"]  # (B, T, concat_dim) 
-            for i in range(batch_size):
-                concat_feature.append(concat_feature_[i, :valid_len[i], :])
-            self.preprocess(concat_feature)  # (B, C, T, 1, 1)
-            for i in range(batch_size):
-                noisy_feature_input[i] = torch.cat(
-                    (
-                        noisy_feature_input[i],
-                        concat_feature[i][:, input_start_index[i]:input_end_index[i], ...],
-                    ),
-                    dim=0,
-                )
 
         # Get contexts from cross modules
         all_contexts, _ = self._get_all_contexts(
@@ -615,7 +660,7 @@ class DiffForcingWanModel(nn.Module):
         loss_dict = {"total": loss, "mse": loss}
         return loss_dict
 
-    def generate(self, x, schedule_config={}):
+    def generate(self, x):
         """
         Generation - Diffusion Forcing inference
         Uses triangular noise schedule, progressively generating from left to right
@@ -625,8 +670,6 @@ class DiffForcingWanModel(nn.Module):
         2. Each t corresponds to a noise schedule: clean on left, noisy on right, gradient in middle
         3. After each denoising step, t increases slightly and continues
         """
-        self.schedule_config.update(schedule_config)
-        self.time_scheduler = TIME_SCHEDULER_REGISTRY[self.schedule_config["schedule_name"]](self.schedule_config)
         extra_len = self.schedule_config.get("extra_len", 0)
         feature_length = x["feature_length"]  # (B,)
         batch_size = len(feature_length)
@@ -639,19 +682,22 @@ class DiffForcingWanModel(nn.Module):
             valid_len.append(length)
         generated_len = [seq_len for _ in range(batch_size)]
 
-        # Initialize entire sequence as pure noise, generate use seq_len for all samples
-        generated = torch.randn(batch_size, seq_len, self.input_dim, device=device)
+        # Initialize entire sequence as pure noise
+        generated = torch.randn(batch_size, seq_len, *self.spatial_shape, self.input_dim, device=device)
         generated = [generated[i] for i in range(batch_size)]
-        generated = self.preprocess(generated)  # list of (C, total_len, 1, 1)
+        generated = self.preprocess(generated)
 
-        # Get contexts from cross modules
-        all_contexts, metadata = self._get_all_contexts(
-            x, generated_len, seq_len, device, training=False,
-        )
+        # Precompute contexts for each cfg entry
+        cfg_contexts_list = []
+        metadata = {}
+        for cfg_entry in self.cfg_config:
+            ctx, meta = self._get_all_contexts(
+                x, generated_len, seq_len, device, training=False,
+                crossmodule_switch=cfg_entry["crossmodule"],
+            )
+            cfg_contexts_list.append(ctx)
+            metadata.update(meta)
         full_text = metadata.get("full_text", x.get("text", [""] * batch_size))
-
-        # Get null contexts for CFG
-        all_null_contexts = self._get_all_null_contexts(batch_size, device)
 
         total_steps = self.time_scheduler.get_total_steps(seq_len)
         # Progressively advance from t=0 to t=max_t
@@ -673,27 +719,21 @@ class DiffForcingWanModel(nn.Module):
                 ts = time_schedules[i][:input_end_index[i]]
                 time_schedules_padded[i, :len(ts)] = ts
 
-            predicted_result = self.model(
-                noisy_input,
-                time_schedules_padded * self.time_embedding_scale,
-                all_contexts,
-                seq_len,
-                y=None,
-            )  # list of (C, T, 1, 1)
-
-            # Adjust using CFG
-            if self.cfg_scale != 1.0:
-                predicted_result_null = self.model(
+            # Run model for each cfg entry and accumulate
+            predicted_result = None
+            for cfg_idx, cfg_entry in enumerate(self.cfg_config):
+                scale = cfg_entry["scale"]
+                pred = self.model(
                     noisy_input,
                     time_schedules_padded * self.time_embedding_scale,
-                    all_null_contexts,
+                    cfg_contexts_list[cfg_idx],
                     seq_len,
                     y=None,
                 )
-                predicted_result = [
-                    self.cfg_scale * pv - (self.cfg_scale - 1) * pvn
-                    for pv, pvn in zip(predicted_result, predicted_result_null)
-                ]
+                if predicted_result is None:
+                    predicted_result = [scale * p for p in pred]
+                else:
+                    predicted_result = [a + scale * p for a, p in zip(predicted_result, pred)]
 
             for i in range(batch_size):
                 predicted_result_i = predicted_result[i]  # (C, seq_len, 1, 1)
@@ -712,9 +752,9 @@ class DiffForcingWanModel(nn.Module):
                     predicted_vel = (
                         predicted_result_i[:, os:oe, ...]
                         - generated[i][:, os:oe, ...]
-                    ) / (1 + dt - nl) * nld
+                    ) / (1 - nl + EPSILON) * nld
                 generated[i][:, os:oe, ...] += predicted_vel * dt
-
+                
         generated = self.postprocess(generated)  # list of (T, C)
         y_hat_out = []
         for i in range(batch_size):
@@ -747,8 +787,8 @@ class DiffForcingWanModel(nn.Module):
         self.condition_frames = 0
 
         device = next(self.parameters()).device
-        # Initialize entire buffer as pure noise — list of B (C, buf_len, 1, 1)
-        generated = torch.randn(batch_size, self.buf_len, self.input_dim, device=device)
+        # Initialize entire buffer as pure noise
+        generated = torch.randn(batch_size, self.buf_len, *self.spatial_shape, self.input_dim, device=device)
         generated = [generated[i] for i in range(batch_size)]
         self.generated = self.preprocess(generated)
 
@@ -756,16 +796,13 @@ class DiffForcingWanModel(nn.Module):
         for cm in self.cross_modules:
             cm.init_stream(self.batch_size)
 
-        # Pre-compute null contexts for CFG
-        self.stream_null_contexts = self._get_all_null_contexts(self.batch_size, device)
 
     def _rollback(self):
         """Shift buffer by seq_len when conditions overflow the window."""
         for i in range(self.batch_size):
             self.generated[i][:, :self.seq_len, ...] = self.generated[i][:, self.seq_len:, ...].clone()
-            self.generated[i][:, self.seq_len:, ...] = torch.randn(
-                self.input_dim, self.seq_len, 1, 1,
-                device=self.generated[i].device,
+            self.generated[i][:, self.seq_len:, ...] = torch.randn_like(
+                self.generated[i][:, self.seq_len:, ...]
             )
         self.current_step -= self.time_scheduler.get_step_rollback(self.seq_len)
         self.condition_frames -= self.seq_len
@@ -811,35 +848,36 @@ class DiffForcingWanModel(nn.Module):
             ts = time_schedules[0][is_[0]:ie_[0]][-self.seq_len:]
             cut_length = max(0, (ie_[0] - is_[0]) - self.seq_len)
 
-            all_contexts = [
-                cm.get_stream_context(is_[0], ie_[0], self.seq_len)
-                for cm in self.cross_modules
-            ]
-
             time_schedules_padded = torch.zeros(self.batch_size, self.seq_len, device=device)
             for i in range(self.batch_size):
                 time_schedules_padded[i, :len(ts)] = ts
 
-            predicted_result = self.model(
-                noisy_input,
-                time_schedules_padded * self.time_embedding_scale,
-                all_contexts,
-                self.seq_len,
-                y=None,
-            )
-
-            if self.cfg_scale != 1.0:
-                predicted_result_null = self.model(
+            # Run model for each cfg entry and accumulate
+            predicted_result = None
+            for cfg_entry in self.cfg_config:
+                scale = cfg_entry["scale"]
+                switches = cfg_entry["crossmodule"]
+                entry_contexts = []
+                for j, cm in enumerate(self.cross_modules):
+                    if switches[j]:
+                        entry_contexts.append(
+                            cm.get_stream_context(is_[0], ie_[0], self.seq_len)
+                        )
+                    else:
+                        entry_contexts.append(
+                            cm.get_null_context(self.batch_size, device, self.param_dtype)
+                        )
+                pred = self.model(
                     noisy_input,
                     time_schedules_padded * self.time_embedding_scale,
-                    self.stream_null_contexts,
+                    entry_contexts,
                     self.seq_len,
                     y=None,
                 )
-                predicted_result = [
-                    self.cfg_scale * pv - (self.cfg_scale - 1) * pvn
-                    for pv, pvn in zip(predicted_result, predicted_result_null)
-                ]
+                if predicted_result is None:
+                    predicted_result = [scale * p for p in pred]
+                else:
+                    predicted_result = [a + scale * p for a, p in zip(predicted_result, pred)]
 
             os_idx, oe_idx = os_[0], oe_[0]
             dt = time_schedules_derivative[0][os_idx:oe_idx][None, :, None, None]
@@ -861,7 +899,7 @@ class DiffForcingWanModel(nn.Module):
                     predicted_vel = (
                         predicted_result_i[:, pred_os_idx:pred_oe_idx, ...]
                         - self.generated[i][:, os_idx:oe_idx, ...]
-                    ) / (1 + dt - nl) * nld
+                    ) / (1 - nl + EPSILON) * nld
                 self.generated[i][:, os_idx:oe_idx, ...] += predicted_vel * dt
             self.current_step += 1
 
@@ -874,5 +912,7 @@ class DiffForcingWanModel(nn.Module):
             self.current_commit = committable_length
             return {"generated": output}
         else:
-            return {"generated": [torch.zeros(0, self.input_dim, device=device)
-                                  for _ in range(self.batch_size)]}
+            empty = [torch.zeros(self.input_dim, 0, *self.spatial_shape, device=device)
+                     for _ in range(self.batch_size)]
+            empty = self.postprocess(empty)
+            return {"generated": empty}
