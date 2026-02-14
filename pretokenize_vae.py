@@ -9,7 +9,7 @@ from tqdm import tqdm
 
 from utils.initialize import instantiate, load_config
 
-RAW_DATA_PATH = "/mnt/data/cpfs/cyy/raw_data"
+RAW_DATA_PATH = "raw_data"
 PATH_FILES = [
     [
         f"{RAW_DATA_PATH}/BABEL_streamed/train_processed.txt",
