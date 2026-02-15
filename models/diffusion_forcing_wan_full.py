@@ -560,7 +560,7 @@ class DiffForcingWanModel(nn.Module):
             x, generated_len, seq_len, device, self.param_dtype, training=False,
         )
         null_context = self.text_module.get_null_context(batch_size, device, self.param_dtype)
-        full_text = metadata.get("full_text", x.get("text", [""] * batch_size))
+        full_text = metadata["full_text"]
 
         total_steps = self.time_scheduler.get_total_steps(seq_len)
         # Progressively advance from t=0 to t=max_t
