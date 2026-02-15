@@ -484,7 +484,6 @@ if __name__ == '__main__':
         cfg = load_config(config_path=model_config_path)
         # Default schedule_config matching DiffForcingWanModel constructor default
         default_schedule_config = {
-            "schedule_name": "TriangularTimeScheduler",
             "noise_type": "linear",
             "chunk_size": 5,
             "steps": 10,

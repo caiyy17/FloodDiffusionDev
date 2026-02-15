@@ -17,7 +17,7 @@ class TriangularTimeScheduler:
         self.chunk_size = config["chunk_size"]
         self.noise_type = config.get("noise_type", "linear")
         self.exponent = config.get("exponent", 2.0)
-        self.random_epsilon = config.get("random_epsilon", 0.01) # schedule jittering
+        self.random_epsilon = config.get("random_epsilon", 0.00) # schedule jittering
 
     def get_total_steps(self, seq_len):
         return int(self.steps * seq_len / self.chunk_size)
@@ -102,24 +102,36 @@ class TriangularTimeScheduler:
             noise_level_derivative.append(nld)
         return noise_level, noise_level_derivative
     
-    def add_noise(self, x, noise_level, training=False, noise=None):
-        """Add noise
+    def add_noise(self, x, noise_level, input_start, input_end, output_start, output_end, training=False, noise=None):
+        """Add noise and slice into input/reference regions.
         Args:
-            x: list of (C, T, H, W)
+            x: list of (C, T, H, W), x0 in training, xt in inference
             noise_level: list of (T,)
+            input_start/input_end: per-sample input window indices
+            output_start/output_end: per-sample output window indices
+        Returns:
+            x0: list of (C, output_len, H, W)
+            eps: list of (C, output_len, H, W)
+            xt: list of (C, input_len, H, W)
         """
-        noisy_x = []
-        noise_output = []
-        for i in range(len(x)):
-            if noise is not None:
-                noise_i = noise[i]
-            else:
-                noise_i = torch.randn_like(x[i])
-            noise_level_i = noise_level[i][None, :, None, None]  # (1, T, 1, 1)
-            noisy_x_i = x[i] * (1 - noise_level_i) + noise_level_i * noise_i
-            noisy_x.append(noisy_x_i)
-            noise_output.append(noise_i)
-        return noisy_x, noise_output
+        x0 = []
+        eps = []
+        xt = []
+        if training:
+            for i in range(len(x)):
+                if noise is not None:
+                    noise_i = noise[i]
+                else:
+                    noise_i = torch.randn_like(x[i])
+                noise_level_i = noise_level[i][None, :, None, None]  # (1, T, 1, 1)
+                noisy_x_i = x[i] * (1 - noise_level_i) + noise_level_i * noise_i
+                x0.append(x[i][:, output_start[i]:output_end[i], ...])
+                eps.append(noise_i[:, output_start[i]:output_end[i], ...])
+                xt.append(noisy_x_i[:, input_start[i]:input_end[i], ...])
+        else:
+            for i in range(len(x)):
+                xt.append(x[i][:, input_start[i]:input_end[i], ...])
+        return x0, eps, xt
 
     # --- Streaming support ---
 
@@ -339,8 +351,15 @@ class DiffForcingWanModel(nn.Module):
             "text_scale": 5.0,
             "null_scale": -4.0,
         },
+        input_keys={
+            "feature": "feature",
+            "feature_length": "feature_length",
+            "text": "text",
+            "text_end": "text_end",
+        },
     ):
         super().__init__()
+        self.input_keys = input_keys
 
         self.mean_path = mean_path
         self.std_path = std_path
@@ -395,6 +414,14 @@ class DiffForcingWanModel(nn.Module):
         )
         self.param_dtype = torch.float32
 
+    def _extract_inputs(self, x):
+        """Extract inputs from x using input_keys mapping."""
+        inputs = {}
+        for internal_key, external_key in self.input_keys.items():
+            if external_key in x:
+                inputs[internal_key] = x[external_key]
+        return inputs
+
     def preprocess(self, x):
         """Convert last-channel format to channel-first, padding to 4D (C, T, H, W).
         (T, C) -> (C, T, 1, 1)
@@ -428,6 +455,7 @@ class DiffForcingWanModel(nn.Module):
         return x
 
     def forward(self, x):
+        x = self._extract_inputs(x)
         feature_original = x["feature"]  # (B, T, C)
         feature_length = x["feature_length"]  # (B,)
         feature_original = (feature_original - self.mean) / self.std
@@ -449,15 +477,9 @@ class DiffForcingWanModel(nn.Module):
         time_schedules, _ = self.time_scheduler.get_time_schedules(device, valid_len, time_steps, training=True)  # (B, T)
         noise_level, noise_level_derivative = self.time_scheduler.get_noise_levels(device, valid_len, time_schedules)  # (B, T)
         input_start_index, input_end_index, output_start_index, output_end_index = self.time_scheduler.get_windows(valid_len, time_steps)
-        noisy_feature, noise = self.time_scheduler.add_noise(feature, noise_level, training=True)
-
-        feature_ref = []
-        noise_ref = []
-        noisy_feature_input = []
-        for i in range(batch_size):
-            feature_ref.append(feature[i][:, output_start_index[i]:output_end_index[i], ...])
-            noise_ref.append(noise[i][:, output_start_index[i]:output_end_index[i], ...])
-            noisy_feature_input.append(noisy_feature[i][:, input_start_index[i]:input_end_index[i], ...])
+        x0, eps, xt = self.time_scheduler.add_noise(
+            feature, noise_level, input_start_index, input_end_index, output_start_index, output_end_index, training=True
+        )
 
         # Get context from text cross module
         context, _ = self.text_module.get_context(
@@ -467,12 +489,12 @@ class DiffForcingWanModel(nn.Module):
         # Pad noise_level list into [B, seq_len] tensor for WanModel
         time_schedules_padded = torch.zeros(batch_size, seq_len, device=device)
         for i in range(batch_size):
-            ts = time_schedules[i][:input_end_index[i]]
+            ts = time_schedules[i][input_start_index[i]:input_end_index[i]]
             time_schedules_padded[i, :len(ts)] = ts
 
         # Through WanModel
         predicted_result = self.model(
-            noisy_feature_input,
+            xt,
             time_schedules_padded * self.time_embedding_scale,
             context,
             seq_len,
@@ -481,21 +503,23 @@ class DiffForcingWanModel(nn.Module):
 
         loss = 0.0
         for b in range(batch_size):
+            pred_os = output_start_index[b] - input_start_index[b]
+            pred_oe = output_end_index[b] - input_start_index[b]
+            nld = noise_level_derivative[b][output_start_index[b]:output_end_index[b]]
             if self.prediction_type == "vel":
-                nld = noise_level_derivative[b][output_start_index[b]:output_end_index[b]]
-                vel = (noise_ref[b] - feature_ref[b]) * nld[None, :, None, None]  # (C, output_length, 1, 1)
+                vel = (eps[b] - x0[b]) * nld[None, :, None, None]  # (C, output_length, 1, 1)
                 squared_error = (
-                    predicted_result[b][:, output_start_index[b]:output_end_index[b], ...] - vel
+                    predicted_result[b][:, pred_os:pred_oe, ...] - vel
                 ) ** 2
             elif self.prediction_type == "x0":
                 squared_error = (
-                    predicted_result[b][:, output_start_index[b]:output_end_index[b], ...]
-                    - feature_ref[b]
+                    predicted_result[b][:, pred_os:pred_oe, ...]
+                    - x0[b]
                 ) ** 2
             elif self.prediction_type == "noise":
                 squared_error = (
-                    predicted_result[b][:, output_start_index[b]:output_end_index[b], ...]
-                    - noise_ref[b]
+                    predicted_result[b][:, pred_os:pred_oe, ...]
+                    - eps[b]
                 ) ** 2
             sample_loss = squared_error.mean()
             loss += sample_loss
@@ -513,6 +537,7 @@ class DiffForcingWanModel(nn.Module):
         2. Each t corresponds to a noise schedule: clean on left, noisy on right, gradient in middle
         3. After each denoising step, t increases slightly and continues
         """
+        x = self._extract_inputs(x)
         extra_len = self.schedule_config.get("extra_len", 0)
         feature_length = x["feature_length"]  # (B,)
         batch_size = len(feature_length)
@@ -545,26 +570,24 @@ class DiffForcingWanModel(nn.Module):
             time_schedules, time_schedules_derivative = self.time_scheduler.get_time_schedules(device, generated_len, time_steps)  # (B, T)
             noise_level, noise_level_derivative = self.time_scheduler.get_noise_levels(device, generated_len, time_schedules)  # (B, T)
             input_start_index, input_end_index, output_start_index, output_end_index = self.time_scheduler.get_windows(generated_len, time_steps)
-
-            # Predict through WanModel
-            noisy_input = []
-            for i in range(batch_size):
-                noisy_input.append(generated[i][:, input_start_index[i]:input_end_index[i], ...])  # (C, T, 1, 1)
+            _, _, xt = self.time_scheduler.add_noise(
+                generated, noise_level, input_start_index, input_end_index, output_start_index, output_end_index, training=False
+            )
 
             # Pad noise_level list into [B, seq_len] tensor for WanModel
             time_schedules_padded = torch.zeros(batch_size, seq_len, device=device)
             for i in range(batch_size):
-                ts = time_schedules[i][:input_end_index[i]]
+                ts = time_schedules[i][input_start_index[i]:input_end_index[i]]
                 time_schedules_padded[i, :len(ts)] = ts
 
             # CFG: text_scale * pred_text + null_scale * pred_null
             pred_text = self.model(
-                noisy_input,
+                xt,
                 time_schedules_padded * self.time_embedding_scale,
                 text_context, seq_len, y=None,
             )
             pred_null = self.model(
-                noisy_input,
+                xt,
                 time_schedules_padded * self.time_embedding_scale,
                 null_context, seq_len, y=None,
             )
@@ -574,23 +597,25 @@ class DiffForcingWanModel(nn.Module):
             ]
 
             for i in range(batch_size):
-                predicted_result_i = predicted_result[i]  # (C, seq_len, 1, 1)
+                predicted_result_i = predicted_result[i]
                 os, oe = output_start_index[i], output_end_index[i]
+                pred_os = os - input_start_index[i]
+                pred_oe = oe - input_start_index[i]
                 dt = time_schedules_derivative[i][os:oe][None, :, None, None]
                 nl = noise_level[i][os:oe][None, :, None, None]
                 nld = noise_level_derivative[i][os:oe][None, :, None, None]
                 if self.prediction_type == "vel":
-                    predicted_vel = predicted_result_i[:, os:oe, ...]
+                    predicted_vel = predicted_result_i[:, pred_os:pred_oe, ...]
                 elif self.prediction_type == "x0":
                     predicted_vel = (
                         generated[i][:, os:oe, ...]
-                        - predicted_result_i[:, os:oe, ...]
+                        - predicted_result_i[:, pred_os:pred_oe, ...]
                     ) / nl * nld
                 elif self.prediction_type == "noise":
                     predicted_vel = (
-                        predicted_result_i[:, os:oe, ...]
+                        predicted_result_i[:, pred_os:pred_oe, ...]
                         - generated[i][:, os:oe, ...]
-                    ) / (1 - nl + EPSILON) * nld
+                    ) / (1 - nl + dt) * nld
                 generated[i][:, os:oe, ...] += predicted_vel * dt
                 
         generated = self.postprocess(generated)  # list of (T, C)
@@ -655,6 +680,7 @@ class DiffForcingWanModel(nn.Module):
         Returns:
             dict with "generated": list of one (N, C) tensor, or [] if nothing to commit.
         """
+        x = self._extract_inputs(x)
         device = next(self.parameters()).device
         self.generated = [g.to(device) for g in self.generated]
 
@@ -670,16 +696,19 @@ class DiffForcingWanModel(nn.Module):
         committable_length, committable_steps = self.time_scheduler.get_committable(self.condition_frames)
         while self.current_step < committable_steps:
             time_steps = self.time_scheduler.get_time_steps(
-                device, [self.buf_len], self.current_step)
+                device, [self.buf_len] * self.batch_size, self.current_step)
             time_schedules, time_schedules_derivative = (
                 self.time_scheduler.get_time_schedules(
-                    device, [self.buf_len], time_steps))
+                    device, [self.buf_len] * self.batch_size, time_steps))
             noise_level, noise_level_derivative = self.time_scheduler.get_noise_levels(
-                device, [self.buf_len], time_schedules)
+                device, [self.buf_len] * self.batch_size, time_schedules)
             is_, ie_, os_, oe_ = self.time_scheduler.get_windows(
-                [self.buf_len], time_steps)
-            noisy_input = [self.generated[i][:, is_[0]:ie_[0], ...][:, -self.seq_len:, ...]
-                           for i in range(self.batch_size)]
+                [self.buf_len] * self.batch_size, time_steps)
+            _, _, xt = self.time_scheduler.add_noise(
+                self.generated, noise_level, is_, ie_, os_, oe_, training=False
+            )
+
+            noisy_input = [xt[i][:, -self.seq_len:, ...] for i in range(self.batch_size)]
             ts = time_schedules[0][is_[0]:ie_[0]][-self.seq_len:]
             cut_length = max(0, (ie_[0] - is_[0]) - self.seq_len)
 
@@ -711,13 +740,13 @@ class DiffForcingWanModel(nn.Module):
 
             os_idx, oe_idx = os_[0], oe_[0]
             dt = time_schedules_derivative[0][os_idx:oe_idx][None, :, None, None]
-            pred_os_idx = os_idx - cut_length
-            pred_oe_idx = oe_idx - cut_length
+            pred_os_idx = os_idx - is_[0] - cut_length
+            pred_oe_idx = oe_idx - is_[0] - cut_length
+            nl = noise_level[0][os_idx:oe_idx][None, :, None, None]
+            nld = noise_level_derivative[0][os_idx:oe_idx][None, :, None, None]
 
             for i in range(self.batch_size):
                 predicted_result_i = predicted_result[i]
-                nl = noise_level[0][os_idx:oe_idx][None, :, None, None]
-                nld = noise_level_derivative[0][os_idx:oe_idx][None, :, None, None]
                 if self.prediction_type == "vel":
                     predicted_vel = predicted_result_i[:, pred_os_idx:pred_oe_idx, ...]
                 elif self.prediction_type == "x0":
@@ -729,7 +758,7 @@ class DiffForcingWanModel(nn.Module):
                     predicted_vel = (
                         predicted_result_i[:, pred_os_idx:pred_oe_idx, ...]
                         - self.generated[i][:, os_idx:oe_idx, ...]
-                    ) / (1 - nl + EPSILON) * nld
+                    ) / (1 - nl + dt) * nld
                 self.generated[i][:, os_idx:oe_idx, ...] += predicted_vel * dt
             self.current_step += 1
 

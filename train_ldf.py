@@ -66,23 +66,12 @@ class CustomLightningModule(BasicLightningModule):
         self.t2m_metrics = T2MMetrics(self.cfg.metrics.t2m)
 
     def _step(self, batch, is_training=True):
-        # Create a copy and replace motion fields with token fields
-        model_batch = batch.copy()
-        model_batch["feature"] = batch["token"]
-        model_batch["feature_length"] = batch["token_length"]
-        if "token_text_end" in batch:
-            model_batch["feature_text_end"] = batch["token_text_end"]
-        out = self.model(model_batch)
+        out = self.model(batch)
         return out
 
     def update_metrics(self, batch):
         with self.ema.average_parameters(self.model.parameters()):
-            model_batch = batch.copy()
-            model_batch["feature"] = batch["token"]
-            model_batch["feature_length"] = batch["token_length"]
-            if "token_text_end" in batch:
-                model_batch["feature_text_end"] = batch["token_text_end"]
-            output = self.model.generate(model_batch)
+            output = self.model.generate(batch)
         generated = output["generated"]
         ground_truth_token = batch["token"]
         gt_token_length = batch["token_length"]
@@ -132,12 +121,7 @@ class CustomLightningModule(BasicLightningModule):
 
     def update_test(self, batch):
         with self.ema.average_parameters(self.model.parameters()):
-            model_batch = batch.copy()
-            model_batch["feature"] = batch["token"]
-            model_batch["feature_length"] = batch["token_length"]
-            if "token_text_end" in batch:
-                model_batch["feature_text_end"] = batch["token_text_end"]
-            output = self.model.generate(model_batch)
+            output = self.model.generate(batch)
         generated = output["generated"]
         text = output["text"]
         # Save motion

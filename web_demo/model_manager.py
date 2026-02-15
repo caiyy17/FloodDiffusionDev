@@ -266,7 +266,8 @@ class ModelManager:
                         step_start = time.time()
                         
                         # Generate one token (produces 4 frames from VAE)
-                        x = {"text": [self.current_text]}
+                        text_key = self.model.input_keys["text"]
+                        x = {text_key: [self.current_text]}
                         
                         # Generate from model (1 token)
                         output = self.model.stream_generate_step(x)

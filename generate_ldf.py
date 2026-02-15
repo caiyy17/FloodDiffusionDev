@@ -89,12 +89,12 @@ def generate_feature_stream(
         dict: Contains "generated" (current generated feature segment)
     """
 
-    # Construct input dict x
-    # stream_generate needs x to contain "feature_length", "text", "feature_text_end" (if text is list of list)
-    x = {"feature_length": torch.tensor(feature_length), "text": text}
+    # Construct input dict x using model's input_keys mapping
+    ik = model.input_keys
+    x = {ik["feature_length"]: torch.tensor(feature_length), ik["text"]: text}
 
     if feature_text_end is not None:
-        x["feature_text_end"] = feature_text_end
+        x[ik["text_end"]] = feature_text_end
 
     # Call model's stream_generate
     # Note: stream_generate is a generator
@@ -121,9 +121,10 @@ if __name__ == "__main__":
     feature_text_end = [text_end]
     feature_length = [length]
 
-    x = {"feature_length": torch.tensor(feature_length), "text": text}
+    ik = model.input_keys
+    x = {ik["feature_length"]: torch.tensor(feature_length), ik["text"]: text}
     if feature_text_end is not None:
-        x["feature_text_end"] = feature_text_end
+        x[ik["text_end"]] = feature_text_end
 
     with torch.no_grad():
         # # non-streaming generate
@@ -194,7 +195,7 @@ if __name__ == "__main__":
             for i in range(duration):
                 start_time = time.time()
                 x = {}
-                x["text"] = [text_item]  # text_item is a string
+                x[model.input_keys["text"]] = [text_item]  # text_item is a string
                 output = model.stream_generate_step(x)
                 output = output["generated"]
                 # print("output shape: ", output[0].shape)

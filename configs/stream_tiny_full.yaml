@@ -1,0 +1,44 @@
+exp_name: stream_tiny_full # Experiment names
+seed: 1234 # Seed value
+
+test_ckpt: "${dirs.outputs}/20260213_131110_test_5090_ldf_new/step_step=10000.ckpt"
+test_vae_ckpt: "${dirs.outputs}/20260113_233726_vae_wan_z4/step_step=2250000.ckpt"
+test_vae:
+    target: models.vae_wan.VAEWanModel
+    ema_decay: 0.99
+    params:
+        input_dim: 263
+        z_dim: 4
+model:
+    target: models.diffusion_forcing_wan_full.DiffForcingWanModel
+    ema_decay: 0.99
+    params:
+        text_config:
+            len: 256
+            dim: 768
+            t5_size: "base"
+            checkpoint_path: "${dirs.deps}/t5_umt5-base-enc/models_t5_umt5-base-enc.pth"
+            tokenizer_path: "${dirs.deps}/t5_umt5-base-enc/google/umt5-base"
+        schedule_config:
+            noise_type: "linear"
+            chunk_size: 5
+            steps: 10
+        input_dim: 4
+        mean_path: "${dirs.raw_data}/HumanML3D/Mean_TOKENS_20260113_233726_vae_wan_z4_2250000.npy"
+        std_path: "${dirs.raw_data}/HumanML3D/Std_TOKENS_20260113_233726_vae_wan_z4_2250000.npy"
+        hidden_dim: 256
+        ffn_dim: 1024
+        freq_dim: 64
+        num_heads: 8
+        num_layers: 8
+        time_embedding_scale: 1.0
+        input_keys:
+            feature: "token"
+            feature_length: "token_length"
+            text: "text"
+            text_end: "token_text_end"
+        cfg_config:
+            text_scale: 5.0
+            null_scale: -4.0
+        prediction_type: "vel"
+        causal: False
