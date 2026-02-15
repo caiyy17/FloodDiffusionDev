@@ -79,34 +79,47 @@ class TriangularTimeScheduler:
         return input_start, input_end, output_start, output_end
 
     def get_noise_levels(self, device, valid_len, time_schedules):
-        noise_level = []
-        noise_level_derivative = []
+        alpha = []
+        alpha_derivative = []
+        beta = []
+        beta_derivative = []
         for i in range(len(valid_len)):
             t = time_schedules[i]
             if self.noise_type == "linear":
-                nl = (1 - t).to(device)
-                nld = (-torch.ones_like(nl)).to(device)
+                alpha_i = t.to(device)
+                alpha_derivative_i = torch.ones_like(alpha_i).to(device)
+                beta_i = (1 - t).to(device)
+                beta_derivative_i = (-torch.ones_like(beta_i)).to(device)
             elif self.noise_type == "exponential":
                 if self.exponent > 1.0:
-                    nl = ((1 - t) ** self.exponent).to(device)
-                    nld = (-self.exponent * (1 - t) ** (self.exponent - 1)).to(device)
+                    beta_i = ((1 - t) ** self.exponent).to(device)
+                    beta_derivative_i = (-self.exponent * (1 - t) ** (self.exponent - 1)).to(device)
+                    alpha_i = (1 - beta_i).to(device)
+                    alpha_derivative_i = (-beta_derivative_i).to(device)
                 elif self.exponent == 1.0:
-                    nl = (1 - t).to(device)
-                    nld = (-torch.ones_like(nl)).to(device)
+                    alpha_i = t.to(device)
+                    alpha_derivative_i = torch.ones_like(alpha_i).to(device)
+                    beta_i = (1 - t).to(device)
+                    beta_derivative_i = (-torch.ones_like(beta_i)).to(device)
                 else:
-                    nl = (1 - t ** (1 / self.exponent)).to(device)
-                    nld = (-(1 / self.exponent) * t ** (1 / self.exponent - 1)).to(device)
+                    alpha_i = (t ** (1 / self.exponent)).to(device)
+                    alpha_derivative_i = ((1 / self.exponent) * t ** (1 / self.exponent - 1)).to(device)
+                    beta_i = (1 - alpha_i).to(device)
+                    beta_derivative_i = (-alpha_derivative_i).to(device)
             else:
                 raise ValueError(f"Unknown noise type: {self.noise_type}")
-            noise_level.append(nl)
-            noise_level_derivative.append(nld)
-        return noise_level, noise_level_derivative
+            alpha.append(torch.clamp(alpha_i, min=0.0, max=1.0))
+            alpha_derivative.append(alpha_derivative_i)
+            beta.append(torch.clamp(beta_i, min=0.0, max=1.0))
+            beta_derivative.append(beta_derivative_i)
+        return alpha, alpha_derivative, beta, beta_derivative
     
-    def add_noise(self, x, noise_level, input_start, input_end, output_start, output_end, training=False, noise=None):
+    def add_noise(self, x, alpha, beta, input_start, input_end, output_start, output_end, training=False, noise=None):
         """Add noise and slice into input/reference regions.
         Args:
             x: list of (C, T, H, W), x0 in training, xt in inference
-            noise_level: list of (T,)
+            alpha: list of (T,)
+            beta: list of (T,)
             input_start/input_end: per-sample input window indices
             output_start/output_end: per-sample output window indices
         Returns:
@@ -123,8 +136,9 @@ class TriangularTimeScheduler:
                     noise_i = noise[i]
                 else:
                     noise_i = torch.randn_like(x[i])
-                noise_level_i = noise_level[i][None, :, None, None]  # (1, T, 1, 1)
-                noisy_x_i = x[i] * (1 - noise_level_i) + noise_level_i * noise_i
+                alpha_i = alpha[i][None, :, None, None]  # (1, T, 1, 1)
+                beta_i = beta[i][None, :, None, None]  # (1, T, 1, 1)
+                noisy_x_i = x[i] * alpha_i + noise_i * beta_i  # (C, T, H, W)
                 x0.append(x[i][:, output_start[i]:output_end[i], ...])
                 eps.append(noise_i[:, output_start[i]:output_end[i], ...])
                 xt.append(noisy_x_i[:, input_start[i]:input_end[i], ...])
@@ -335,7 +349,7 @@ class DiffForcingWanModel(nn.Module):
         causal=False,
         rope_channel_split=[1, 0, 0],
         spatial_shape=(1, 1),
-        prediction_type="vel",  # "vel", "x0", "noise"
+        prediction_type="vel",  # "vel", "x0", "eps"
         text_config={
             "len": 512,
             "dim": 4096,
@@ -475,10 +489,10 @@ class DiffForcingWanModel(nn.Module):
         # get time steps and noise levels
         time_steps = self.time_scheduler.get_time_steps(device, valid_len)  # (B,)
         time_schedules, _ = self.time_scheduler.get_time_schedules(device, valid_len, time_steps, training=True)  # (B, T)
-        noise_level, noise_level_derivative = self.time_scheduler.get_noise_levels(device, valid_len, time_schedules)  # (B, T)
+        alpha, alpha_derivative, beta, beta_derivative = self.time_scheduler.get_noise_levels(device, valid_len, time_schedules)  # (B, T)
         input_start_index, input_end_index, output_start_index, output_end_index = self.time_scheduler.get_windows(valid_len, time_steps)
         x0, eps, xt = self.time_scheduler.add_noise(
-            feature, noise_level, input_start_index, input_end_index, output_start_index, output_end_index, training=True
+            feature, alpha, beta, input_start_index, input_end_index, output_start_index, output_end_index, training=True
         )
 
         # Get context from text cross module
@@ -505,9 +519,10 @@ class DiffForcingWanModel(nn.Module):
         for b in range(batch_size):
             pred_os = output_start_index[b] - input_start_index[b]
             pred_oe = output_end_index[b] - input_start_index[b]
-            nld = noise_level_derivative[b][output_start_index[b]:output_end_index[b]]
+            alpha_d = alpha_derivative[b][output_start_index[b]:output_end_index[b]]
+            beta_d = beta_derivative[b][output_start_index[b]:output_end_index[b]]
             if self.prediction_type == "vel":
-                vel = (eps[b] - x0[b]) * nld[None, :, None, None]  # (C, output_length, 1, 1)
+                vel = x0[b] * alpha_d[None, :, None, None] + eps[b] * beta_d[None, :, None, None]  # (C, output_length, 1, 1)
                 squared_error = (
                     predicted_result[b][:, pred_os:pred_oe, ...] - vel
                 ) ** 2
@@ -516,7 +531,7 @@ class DiffForcingWanModel(nn.Module):
                     predicted_result[b][:, pred_os:pred_oe, ...]
                     - x0[b]
                 ) ** 2
-            elif self.prediction_type == "noise":
+            elif self.prediction_type == "eps":
                 squared_error = (
                     predicted_result[b][:, pred_os:pred_oe, ...]
                     - eps[b]
@@ -568,10 +583,10 @@ class DiffForcingWanModel(nn.Module):
             # get time steps and noise levels
             time_steps = self.time_scheduler.get_time_steps(device, generated_len, step)  # (B,)
             time_schedules, time_schedules_derivative = self.time_scheduler.get_time_schedules(device, generated_len, time_steps)  # (B, T)
-            noise_level, noise_level_derivative = self.time_scheduler.get_noise_levels(device, generated_len, time_schedules)  # (B, T)
+            alpha, alpha_derivative, beta, beta_derivative = self.time_scheduler.get_noise_levels(device, generated_len, time_schedules)  # (B, T)
             input_start_index, input_end_index, output_start_index, output_end_index = self.time_scheduler.get_windows(generated_len, time_steps)
             _, _, xt = self.time_scheduler.add_noise(
-                generated, noise_level, input_start_index, input_end_index, output_start_index, output_end_index, training=False
+                generated, alpha, beta, input_start_index, input_end_index, output_start_index, output_end_index, training=False
             )
 
             # Pad noise_level list into [B, seq_len] tensor for WanModel
@@ -597,27 +612,24 @@ class DiffForcingWanModel(nn.Module):
             ]
 
             for i in range(batch_size):
-                predicted_result_i = predicted_result[i]
                 os, oe = output_start_index[i], output_end_index[i]
                 pred_os = os - input_start_index[i]
                 pred_oe = oe - input_start_index[i]
+                predicted_result_i = predicted_result[i][:, pred_os:pred_oe, ...]
+                generated_i = generated[i][:, os:oe, ...]
                 dt = time_schedules_derivative[i][os:oe][None, :, None, None]
-                nl = noise_level[i][os:oe][None, :, None, None]
-                nld = noise_level_derivative[i][os:oe][None, :, None, None]
+                alpha_val = alpha[i][os:oe][None, :, None, None]
+                alpha_d = alpha_derivative[i][os:oe][None, :, None, None]
+                beta_val = beta[i][os:oe][None, :, None, None]
+                beta_d = beta_derivative[i][os:oe][None, :, None, None]
                 if self.prediction_type == "vel":
-                    predicted_vel = predicted_result_i[:, pred_os:pred_oe, ...]
+                    vel = predicted_result_i
                 elif self.prediction_type == "x0":
-                    predicted_vel = (
-                        generated[i][:, os:oe, ...]
-                        - predicted_result_i[:, pred_os:pred_oe, ...]
-                    ) / nl * nld
-                elif self.prediction_type == "noise":
-                    predicted_vel = (
-                        predicted_result_i[:, pred_os:pred_oe, ...]
-                        - generated[i][:, os:oe, ...]
-                    ) / (1 - nl + dt) * nld
-                generated[i][:, os:oe, ...] += predicted_vel * dt
-                
+                    vel = predicted_result_i * (-beta_d / beta_val * alpha_val + alpha_d) + generated_i * (beta_d / beta_val)
+                elif self.prediction_type == "eps":
+                    vel = predicted_result_i * (-alpha_d / (alpha_val + dt) * beta_val + beta_d) + generated_i * (alpha_d / (alpha_val + dt))
+                generated[i][:, os:oe, ...] += vel * dt
+
         generated = self.postprocess(generated)  # list of (T, C)
         y_hat_out = []
         for i in range(batch_size):
@@ -700,12 +712,12 @@ class DiffForcingWanModel(nn.Module):
             time_schedules, time_schedules_derivative = (
                 self.time_scheduler.get_time_schedules(
                     device, [self.buf_len] * self.batch_size, time_steps))
-            noise_level, noise_level_derivative = self.time_scheduler.get_noise_levels(
+            alpha, alpha_derivative, beta, beta_derivative = self.time_scheduler.get_noise_levels(
                 device, [self.buf_len] * self.batch_size, time_schedules)
             is_, ie_, os_, oe_ = self.time_scheduler.get_windows(
                 [self.buf_len] * self.batch_size, time_steps)
             _, _, xt = self.time_scheduler.add_noise(
-                self.generated, noise_level, is_, ie_, os_, oe_, training=False
+                self.generated, alpha, beta, is_, ie_, os_, oe_, training=False
             )
 
             noisy_input = [xt[i][:, -self.seq_len:, ...] for i in range(self.batch_size)]
@@ -742,24 +754,21 @@ class DiffForcingWanModel(nn.Module):
             dt = time_schedules_derivative[0][os_idx:oe_idx][None, :, None, None]
             pred_os_idx = os_idx - is_[0] - cut_length
             pred_oe_idx = oe_idx - is_[0] - cut_length
-            nl = noise_level[0][os_idx:oe_idx][None, :, None, None]
-            nld = noise_level_derivative[0][os_idx:oe_idx][None, :, None, None]
+            alpha_val = alpha[0][os_idx:oe_idx][None, :, None, None]
+            alpha_d = alpha_derivative[0][os_idx:oe_idx][None, :, None, None]
+            beta_val = beta[0][os_idx:oe_idx][None, :, None, None]
+            beta_d = beta_derivative[0][os_idx:oe_idx][None, :, None, None]
 
             for i in range(self.batch_size):
-                predicted_result_i = predicted_result[i]
+                predicted_result_i = predicted_result[i][:, pred_os_idx:pred_oe_idx, ...]
+                generated_i = self.generated[i][:, os_idx:oe_idx, ...]
                 if self.prediction_type == "vel":
-                    predicted_vel = predicted_result_i[:, pred_os_idx:pred_oe_idx, ...]
+                    vel = predicted_result_i
                 elif self.prediction_type == "x0":
-                    predicted_vel = (
-                        self.generated[i][:, os_idx:oe_idx, ...]
-                        - predicted_result_i[:, pred_os_idx:pred_oe_idx, ...]
-                    ) / nl * nld
-                elif self.prediction_type == "noise":
-                    predicted_vel = (
-                        predicted_result_i[:, pred_os_idx:pred_oe_idx, ...]
-                        - self.generated[i][:, os_idx:oe_idx, ...]
-                    ) / (1 - nl + dt) * nld
-                self.generated[i][:, os_idx:oe_idx, ...] += predicted_vel * dt
+                    vel = predicted_result_i * (-beta_d / beta_val * alpha_val + alpha_d) + generated_i * (beta_d / beta_val)
+                elif self.prediction_type == "eps":
+                    vel = predicted_result_i * (-alpha_d / (alpha_val + dt) * beta_val + beta_d) + generated_i * (alpha_d / (alpha_val + dt))
+                self.generated[i][:, os_idx:oe_idx, ...] += vel * dt
             self.current_step += 1
 
         # 5. Extract newly committed frames
